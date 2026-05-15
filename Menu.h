@@ -76,10 +76,24 @@ class ViewStack {
 // ============================================================
 //  MenuItem — a row in a MenuListView
 // ============================================================
+// Tag returned by MenuItem::kind() — used by MenuListView to draw a
+// little type-hint icon at the start of each row so users can scan
+// "what does pressing this row do?" at a glance.
+enum class MenuItemKind : uint8_t {
+  Back,           // pops the view stack
+  Submenu,        // pushes a child MenuListView
+  Toggle,         // inline boolean flip
+  Numerical,      // pushes a numerical editor
+  SingleSelect,   // pushes a scroll-list editor
+  GridSelect,     // pushes a grid editor
+  Action,         // fires a callback inline
+};
+
 class MenuItem {
  public:
   virtual ~MenuItem() = default;
   virtual const char* name() const = 0;
+  virtual MenuItemKind kind() const = 0;
   // Writes a line like "CVProb:30" or "Scale:major" into out.
   virtual void Repr(char* out, int cap) const = 0;
   // Pressed while highlighted. Returns a View* to push (the editor),
@@ -141,6 +155,7 @@ class ToggleItem : public MenuItem {
  public:
   ToggleItem(const char* name, bool initial) : name_(name), value_(initial) {}
   const char* name() const override { return name_; }
+  MenuItemKind kind() const override { return MenuItemKind::Toggle; }
   void Repr(char* out, int cap) const override;
   View* OnPressInList(ViewStack& stack, MenuListView& list) override;
   bool value() const { return value_; }
@@ -157,6 +172,7 @@ class NumericalItem : public MenuItem {
       : name_(name), value_(initial),
         min_(min_v), max_(max_v), step_(step) {}
   const char* name() const override { return name_; }
+  MenuItemKind kind() const override { return MenuItemKind::Numerical; }
   void Repr(char* out, int cap) const override;
   View* OnPressInList(ViewStack& stack, MenuListView& list) override;
 
@@ -179,12 +195,24 @@ class SubmenuItem : public MenuItem {
   SubmenuItem(const char* name, MenuListView* child)
       : name_(name), child_(child) {}
   const char* name() const override { return name_; }
+  MenuItemKind kind() const override { return MenuItemKind::Submenu; }
   void  Repr(char* out, int cap) const override;
   View* OnPressInList(ViewStack& stack, MenuListView& list) override;
   MenuListView* child() const { return child_; }
  private:
   const char*   name_;
   MenuListView* child_;
+};
+
+// A "go back" row at the top of a submenu — pops the view stack on
+// press. Stateless: a single shared instance works for every submenu.
+// Long-press still pops too; BackItem makes the affordance discoverable.
+class BackItem : public MenuItem {
+ public:
+  const char* name() const override { return "Back"; }
+  MenuItemKind kind() const override { return MenuItemKind::Back; }
+  void  Repr(char* out, int cap) const override;
+  View* OnPressInList(ViewStack& stack, MenuListView& list) override;
 };
 
 // One-shot action — fires a callback immediately on press, no editor pushed.
@@ -196,6 +224,7 @@ class ActionItem : public MenuItem {
   ActionItem(const char* name, Action action, void* user)
       : name_(name), action_(action), user_(user) {}
   const char* name() const override { return name_; }
+  MenuItemKind kind() const override { return MenuItemKind::Action; }
   void  Repr(char* out, int cap) const override;
   View* OnPressInList(ViewStack& stack, MenuListView& list) override;
  private:
@@ -212,6 +241,7 @@ class SingleSelectItem : public MenuItem {
       : name_(name), options_(options), option_count_(option_count),
         selected_(initial_index) {}
   const char* name() const override { return name_; }
+  MenuItemKind kind() const override { return MenuItemKind::SingleSelect; }
   void Repr(char* out, int cap) const override;
   View* OnPressInList(ViewStack& stack, MenuListView& list) override;
 
@@ -243,6 +273,7 @@ class GridSelectItem : public MenuItem {
       : name_(name), options_(options), option_count_(option_count),
         selected_(initial_index), cols_(cols) {}
   const char* name() const override { return name_; }
+  MenuItemKind kind() const override { return MenuItemKind::GridSelect; }
   void Repr(char* out, int cap) const override;
   View* OnPressInList(ViewStack& stack, MenuListView& list) override;
 

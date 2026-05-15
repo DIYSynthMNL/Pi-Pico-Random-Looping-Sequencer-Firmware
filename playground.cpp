@@ -142,7 +142,6 @@ constexpr StepRateMapping kStepRateMap[kStepRateCount] = {
 // whichever MenuListView happens to be on top.
 std::vector<const char*>  g_scale_names;
 seq::ViewStack            g_views;
-seq::MenuListView         g_main_menu;
 seq::MenuListView         g_clock_menu;
 seq::MenuListView         g_pitch_menu;
 seq::MenuListView         g_probs_menu;
@@ -164,14 +163,10 @@ seq::ToggleItem*          g_run_item          = nullptr;  // audit 2f
 seq::GridSelectItem*      g_cv_source_item    = nullptr;
 seq::GridSelectItem*      g_dig_in_item       = nullptr;  // audit 2e
 
-// Submenu-entry items on the main menu (each pushes its child menu).
-seq::SubmenuItem*         g_clock_sub_item    = nullptr;
-seq::SubmenuItem*         g_pitch_sub_item    = nullptr;
-seq::SubmenuItem*         g_probs_sub_item    = nullptr;
-seq::SubmenuItem*         g_actions_sub_item  = nullptr;
+// Stateless — one shared instance for every submenu's "< Back" row.
+seq::BackItem             g_back_item;
 
 // Item arrays per menu (must outlive the MenuListViews).
-std::vector<seq::MenuItem*> g_main_items;
 std::vector<seq::MenuItem*> g_clock_items;
 std::vector<seq::MenuItem*> g_pitch_items;
 std::vector<seq::MenuItem*> g_probs_items;
@@ -198,6 +193,11 @@ bool g_show_inspector  = true;
 static void DoCyclePlaybackLayout();
 static void DoTogglePlay();
 static void DoTapTempo();
+
+// MainMenuView is defined later (it needs Play toggle and submenu
+// list views which exist in this file lower down). PlaybackView's
+// OnPress wants to push the main view — go through this trampoline.
+static seq::View* MainView();
 
 // ============================================================
 //  Scale rebuild
@@ -301,7 +301,7 @@ class PlaybackView : public seq::View {
 
   // Click → enter the menu.
   void OnPress() override {
-    if (stack()) stack()->Push(&g_main_menu);
+    if (stack()) stack()->Push(MainView());
   }
 
   // Long-press at the root cycles through playback layouts (instead of
@@ -486,6 +486,93 @@ class PlaybackView : public seq::View {
 PlaybackView g_playback_view;
 
 // ============================================================
+//  MainMenuView — the OLED "home menu" rendered graphically
+// ============================================================
+// Sits between PlaybackView (depth 1) and the per-category MenuListViews
+// (depth 3). Layout:
+//
+//   y= 0..21 : big PLAY/STOP banner spanning full width
+//   y=24..63 : 2x2 grid of category tiles (Clock, Pitch, Probs, Actions)
+//
+// highlighted_ ∈ [0..4] where 0 = Play banner, 1..4 = grid tiles row-
+// major. Encoder rotation cycles; click activates.
+class MainMenuView : public seq::View {
+ public:
+  void Draw(seq::FakeOled& oled) const override {
+    oled.Clear();
+
+    const bool playing = g_run_item ? g_run_item->value() : false;
+    DrawBanner(oled, playing, highlighted_ == 0);
+    DrawTiles (oled);
+  }
+
+  void OnRotate(int delta) override {
+    highlighted_ += delta;
+    if (highlighted_ < 0) highlighted_ = 0;
+    if (highlighted_ > 4) highlighted_ = 4;
+  }
+
+  void OnPress() override {
+    if (highlighted_ == 0) {
+      DoTogglePlay();
+      return;
+    }
+    seq::MenuListView* targets[4] = {
+      &g_clock_menu, &g_pitch_menu, &g_probs_menu, &g_actions_menu
+    };
+    if (stack()) stack()->Push(targets[highlighted_ - 1]);
+  }
+
+  // 1..9 jump for number keys (1=play, 2-5 = category tiles).
+  void JumpTo(int idx) {
+    if (idx < 0 || idx > 4) return;
+    highlighted_ = idx;
+  }
+
+ private:
+  static constexpr int kBannerH    = 22;
+  static constexpr int kTileTop    = 24;
+  static constexpr int kTileH      = 20;
+  static constexpr int kTileW      = 64;
+
+  static void DrawBanner(seq::FakeOled& oled, bool playing, bool highlighted) {
+    if (highlighted) {
+      oled.FillRect(0, 0, 128, kBannerH, true);
+    } else {
+      oled.Rect(0, 0, 128, kBannerH);
+    }
+    const bool ink_on = !highlighted;
+    icons::Draw(oled, playing ? icons::kStop : icons::kPlay, 8, 7, ink_on);
+    const char* label = playing ? "STOP" : "PLAY";
+    const int label_w = static_cast<int>(std::strlen(label)) * 6;
+    oled.Text((128 - label_w) / 2, 7, label, ink_on);
+  }
+
+  void DrawTiles(seq::FakeOled& oled) const {
+    static const char* kNames[4] = { "CLOCK", "PITCH", "PROBS", "ACTIONS" };
+    for (int i = 0; i < 4; ++i) {
+      const int col = i % 2;
+      const int row = i / 2;
+      const int x   = col * kTileW;
+      const int y   = kTileTop + row * kTileH;
+      const bool sel = (highlighted_ == i + 1);
+      if (sel) oled.FillRect(x, y, kTileW, kTileH, true);
+      else     oled.Rect    (x, y, kTileW, kTileH);
+      const char* name = kNames[i];
+      const int name_w = static_cast<int>(std::strlen(name)) * 6;
+      const int tx = x + (kTileW - name_w) / 2;
+      const int ty = y + (kTileH - 8) / 2;
+      oled.Text(tx, ty, name, !sel);
+    }
+  }
+
+  int highlighted_ = 0;
+};
+
+MainMenuView g_main_view;
+static seq::View* MainView() { return &g_main_view; }
+
+// ============================================================
 //  Menu commit callback — sync menu items into engine params
 // ============================================================
 static void OnMenuCommit(void* /*user*/) {
@@ -552,22 +639,25 @@ static void BuildMenu() {
       /*cols=*/2);
 
   // ---- Category submenus ----
+  // Each submenu opens with a "< Back" row so the navigation is
+  // discoverable (long-press still works as the shortcut).
   g_clock_items = {
-    g_steps_item, g_step_rate_item, g_dig_in_item,
+    &g_back_item, g_steps_item, g_step_rate_item, g_dig_in_item,
   };
   g_pitch_items = {
-    g_scale_item, g_octaves_item, g_start_note_item, g_cv_source_item,
+    &g_back_item, g_scale_item, g_octaves_item, g_start_note_item, g_cv_source_item,
   };
   g_probs_items = {
-    g_cv_prob_item, g_trig_prob_item, g_trig_length_item,
+    &g_back_item, g_cv_prob_item, g_trig_prob_item, g_trig_length_item,
   };
   g_actions_items = {
-    g_clear_cv_item, g_clear_trig_item,
+    &g_back_item, g_clear_cv_item, g_clear_trig_item,
   };
-  g_clock_menu  .SetTitle("Clock");
-  g_pitch_menu  .SetTitle("Pitch");
-  g_probs_menu  .SetTitle("Probs");
-  g_actions_menu.SetTitle("Actions");
+  // Breadcrumb titles so the user knows where they are in the hierarchy.
+  g_clock_menu  .SetTitle("Main > Clock");
+  g_pitch_menu  .SetTitle("Main > Pitch");
+  g_probs_menu  .SetTitle("Main > Probs");
+  g_actions_menu.SetTitle("Main > Actions");
   g_clock_menu  .SetItems(g_clock_items.data(),   static_cast<int>(g_clock_items.size()));
   g_pitch_menu  .SetItems(g_pitch_items.data(),   static_cast<int>(g_pitch_items.size()));
   g_probs_menu  .SetItems(g_probs_items.data(),   static_cast<int>(g_probs_items.size()));
@@ -579,19 +669,10 @@ static void BuildMenu() {
   g_probs_menu  .SetCommitCallback(&OnMenuCommit, nullptr);
   g_actions_menu.SetCommitCallback(&OnMenuCommit, nullptr);
 
-  // ---- Main menu (Run toggle + 4 category entries) ----
-  g_clock_sub_item   = new seq::SubmenuItem("Clock",   &g_clock_menu);
-  g_pitch_sub_item   = new seq::SubmenuItem("Pitch",   &g_pitch_menu);
-  g_probs_sub_item   = new seq::SubmenuItem("Probs",   &g_probs_menu);
-  g_actions_sub_item = new seq::SubmenuItem("Actions", &g_actions_menu);
-
-  g_main_items = {
-    g_run_item,
-    g_clock_sub_item, g_pitch_sub_item, g_probs_sub_item, g_actions_sub_item,
-  };
-  g_main_menu.SetTitle("Main Menu");
-  g_main_menu.SetItems(g_main_items.data(), static_cast<int>(g_main_items.size()));
-  g_main_menu.SetCommitCallback(&OnMenuCommit, nullptr);
+  // Main menu doesn't use a MenuListView any more — it's rendered as
+  // a graphical MainMenuView (defined below, with a PLAY banner + 2x2
+  // category tiles). The MainMenuView pushes the per-category
+  // MenuListViews on tile press.
 
   // PlaybackView is the bottom of the view stack — the OLED "home"
   // screen. User clicks the encoder to push the menu on top of it,
@@ -961,14 +1042,21 @@ static void DoEncoderLongPress() {
 static seq::MenuListView* TopMenuList() {
   seq::View* top = g_views.top();
   seq::MenuListView* candidates[] = {
-    &g_main_menu, &g_clock_menu, &g_pitch_menu, &g_probs_menu, &g_actions_menu
+    &g_clock_menu, &g_pitch_menu, &g_probs_menu, &g_actions_menu
   };
   for (auto* m : candidates) if (m == top) return m;
   return nullptr;
 }
 static void DoMenuJump(int index) {
   std::lock_guard<std::mutex> lk(g_mutex);
-  if (auto* m = TopMenuList()) m->JumpTo(index);
+  // Number keys jump within whichever menu surface is on top.
+  if (auto* m = TopMenuList()) {
+    m->JumpTo(index);
+    return;
+  }
+  if (g_views.top() == &g_main_view) {
+    g_main_view.JumpTo(index);
+  }
 }
 static void DoCyclePlaybackLayout() {
   std::lock_guard<std::mutex> lk(g_mutex);
@@ -1013,12 +1101,12 @@ static void DoGoHome() {
 static void DoOpenMainMenu() {
   std::lock_guard<std::mutex> lk(g_mutex);
   while (g_views.can_pop()) g_views.Pop();
-  g_views.Push(&g_main_menu);
+  g_views.Push(&g_main_view);
 }
 static void DoOpenSubmenu(seq::MenuListView* sub) {
   std::lock_guard<std::mutex> lk(g_mutex);
   while (g_views.can_pop()) g_views.Pop();
-  g_views.Push(&g_main_menu);
+  g_views.Push(&g_main_view);
   g_views.Push(sub);
 }
 static void DoBack() {

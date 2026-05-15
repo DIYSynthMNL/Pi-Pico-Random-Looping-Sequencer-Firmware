@@ -10,6 +10,49 @@ namespace {
 constexpr int kPixelYShift = 20;
 constexpr int kLineHeight  = 10;
 constexpr int kSpacer      = 2;
+
+// ============================================================
+//  Row icons — drawn at the start of each MenuListView row to hint
+//  what pressing the row does. Each is a 6x8 bitmap (column-major,
+//  bit 0 = top row — same encoding as the FakeOled font).
+// ============================================================
+struct RowIcon { uint8_t cols[6]; };
+
+// `<` chevron pointing left — back / pop the view stack
+constexpr RowIcon kIconBack    = {{0x18, 0x3C, 0x66, 0xC3, 0x00, 0x00}};
+// `>` chevron pointing right — descend into a submenu
+constexpr RowIcon kIconForward = {{0xC3, 0x66, 0x3C, 0x18, 0x00, 0x00}};
+// outlined small square — boolean toggle
+constexpr RowIcon kIconToggle  = {{0x3C, 0x24, 0x24, 0x24, 0x3C, 0x00}};
+// 3 short horizontal lines stacked — slider / numerical editor
+constexpr RowIcon kIconSlider  = {{0x2A, 0x2A, 0x2A, 0x2A, 0x00, 0x00}};
+// diamond — single-select or grid-select editor
+constexpr RowIcon kIconSelect  = {{0x08, 0x14, 0x22, 0x14, 0x08, 0x00}};
+// exclamation mark — one-shot action (destructive)
+constexpr RowIcon kIconAction  = {{0x00, 0x00, 0xBF, 0x00, 0x00, 0x00}};
+
+static void DrawRowIcon(FakeOled& oled, const RowIcon& icon,
+                        int x, int y, bool on) {
+  for (int col = 0; col < 6; ++col) {
+    const uint8_t bits = icon.cols[col];
+    for (int row = 0; row < 8; ++row) {
+      if (bits & (1u << row)) oled.Px(x + col, y + row, on);
+    }
+  }
+}
+
+static const RowIcon& IconForKind(MenuItemKind k) {
+  switch (k) {
+    case MenuItemKind::Back:         return kIconBack;
+    case MenuItemKind::Submenu:      return kIconForward;
+    case MenuItemKind::Toggle:       return kIconToggle;
+    case MenuItemKind::Numerical:    return kIconSlider;
+    case MenuItemKind::SingleSelect: return kIconSelect;
+    case MenuItemKind::GridSelect:   return kIconSelect;
+    case MenuItemKind::Action:       return kIconAction;
+  }
+  return kIconForward;
+}
 }  // namespace
 
 // ============================================================
@@ -92,20 +135,32 @@ void MenuListView::Draw(FakeOled& oled) const {
     char line[24];
     items_[item_index]->Repr(line, sizeof(line));
 
-    // Highlight inversion is briefly turned OFF while a row is flashing,
-    // so the press creates a visible "blink" before returning to normal.
     const bool is_highlighted = (item_index == highlighted_);
     const bool is_flashing    = (item_index == flash_index_ &&
                                  flash_frames_remaining_ > 0);
     const bool invert         = is_highlighted && !is_flashing;
-    if (invert) {
-      oled.FillRect(0, y - 1, 128, kLineHeight, true);
-      oled.Text(0, y, line, false);
-    } else {
-      oled.Text(0, y, line, true);
-    }
+
+    if (invert) oled.FillRect(0, y - 1, 128, kLineHeight, true);
+
+    // Type-hint icon at the start of each row, then the label shifted
+    // 8 px right. Icon colour matches the row's text colour.
+    const bool on = !invert;
+    DrawRowIcon(oled, IconForKind(items_[item_index]->kind()), 0, y, on);
+    oled.Text(8, y, line, on);
   }
   if (flash_frames_remaining_ > 0) --flash_frames_remaining_;
+}
+
+// ============================================================
+//  BackItem
+// ============================================================
+void BackItem::Repr(char* out, int cap) const {
+  std::snprintf(out, cap, "Back");
+}
+
+View* BackItem::OnPressInList(ViewStack& stack, MenuListView& /*list*/) {
+  if (stack.can_pop()) stack.Pop();
+  return nullptr;   // stay in caller's notify-commit path (harmless)
 }
 
 // ============================================================
@@ -132,8 +187,9 @@ void NumericalItem::Repr(char* out, int cap) const {
 //  SubmenuItem
 // ============================================================
 void SubmenuItem::Repr(char* out, int cap) const {
-  // "Name >" — the right-pointing arrow signals "press to descend".
-  std::snprintf(out, cap, "%s >", name_);
+  // Just the name — the row icon (a `>` chevron) already signals "press
+  // to descend", so we don't suffix the name with a redundant arrow.
+  std::snprintf(out, cap, "%s", name_);
 }
 
 View* SubmenuItem::OnPressInList(ViewStack& /*stack*/,
