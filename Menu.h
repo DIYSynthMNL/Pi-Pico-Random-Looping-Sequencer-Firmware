@@ -234,7 +234,15 @@ class SingleSelectEditView : public View {
   SingleSelectEditView(SingleSelectItem* item, MenuListView* parent)
       : item_(item), parent_(parent),
         draft_index_(item->selected_index()),
-        scroll_start_(0) {}
+        scroll_start_(0) {
+    // Position the scroll window so the draft (currently-selected) item
+    // is visible from the first frame. Without this the highlight is
+    // invisible until the user rotates enough to drag the window to it.
+    constexpr int kTotalLines = 4;
+    if (draft_index_ > kTotalLines - 1) {
+      scroll_start_ = draft_index_ - (kTotalLines - 1);
+    }
+  }
   void Draw(FakeOled& oled) const override;
   void OnRotate(int delta) override;
   void OnPress() override;

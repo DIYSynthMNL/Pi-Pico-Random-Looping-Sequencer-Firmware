@@ -1,7 +1,10 @@
 # Makefile for the Generative Sequencer playground (macOS, Homebrew toolchain).
 #
 # Prereqs (one-time):
-#   brew install glfw pkg-config
+#   brew install glfw portaudio pkg-config
+#
+# (portaudio is only used by the audition feature in the playground —
+#  desktop-only synth voice driven by the engine's CV+gate output.)
 #
 # Then to build and run:
 #   make             # builds ./playground
@@ -11,8 +14,8 @@
 
 CXX      = clang++
 CXXFLAGS = -std=c++17 -O2 -Wall -Wno-unused-parameter -DGL_SILENCE_DEPRECATION
-INCLUDES = -I. -Iimgui -Iimgui/backends $(shell pkg-config --cflags glfw3)
-LIBS     = $(shell pkg-config --libs glfw3) \
+INCLUDES = -I. -Iimgui -Iimgui/backends $(shell pkg-config --cflags glfw3 portaudio-2.0)
+LIBS     = $(shell pkg-config --libs glfw3 portaudio-2.0) \
            -framework OpenGL -framework Cocoa -framework IOKit -framework CoreVideo
 
 IMGUI_SRCS = imgui/imgui.cpp imgui/imgui_draw.cpp imgui/imgui_tables.cpp \

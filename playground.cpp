@@ -33,9 +33,11 @@
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 #include <GLFW/glfw3.h>
+#include <portaudio.h>
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -76,6 +78,28 @@ uint16_t               g_disp_cv[seq::kMaxSteps]      = {0};
 uint8_t                g_disp_trig_grid[seq::kMaxSteps] = {0};
 
 seq::FakeOled          g_oled;
+
+// ============================================================
+//  Audition — desktop-only synth voice
+// ============================================================
+// Reads voice(0).last_dac() + trig_active() via the existing display
+// atomics, drives a sine oscillator gated by an AR envelope. Lets you
+// *hear* what the engine is emitting without patching any external
+// hardware. Audio output via PortAudio at 48 kHz stereo.
+constexpr int   kAudioSampleRate = 48000;
+constexpr float kTwoPi           = 6.28318530717958647692f;
+
+std::atomic<bool>  g_audition_enabled{false};
+std::atomic<float> g_audition_volume{0.25f};
+std::atomic<float> g_audition_attack_ms{8.0f};
+std::atomic<float> g_audition_release_ms{300.0f};
+
+// Audio-thread-only state (the audio thread is the only writer).
+float g_audio_phase     = 0.0f;
+float g_audio_env       = 0.0f;
+bool  g_audio_prev_trig = false;
+enum class EnvStage : uint8_t { Idle, Attack, Sustain, Release };
+EnvStage g_audio_env_stage = EnvStage::Idle;
 
 // CV source labels — index = enum value.
 constexpr const char*  kCvSourceNames[]   = { "Normal", "Test", "Tuning" };
@@ -335,6 +359,17 @@ static void RenderControlsWindow() {
   int bpm = g_bpm.load();
   if (ImGui::SliderInt("BPM", &bpm, 20, 240)) g_bpm.store(bpm);
 
+  // Audition (desktop-only) — sine + AR envelope driven by voice(0).
+  ImGui::SeparatorText("Audition (sim only — hear the engine)");
+  bool aud = g_audition_enabled.load();
+  if (ImGui::Checkbox("Audio on", &aud)) g_audition_enabled.store(aud);
+  float vol = g_audition_volume.load();
+  if (ImGui::SliderFloat("Volume", &vol, 0.0f, 1.0f, "%.2f")) g_audition_volume.store(vol);
+  float atk = g_audition_attack_ms.load();
+  if (ImGui::SliderFloat("Attack ms", &atk, 1.0f, 500.0f, "%.0f")) g_audition_attack_ms.store(atk);
+  float rel = g_audition_release_ms.load();
+  if (ImGui::SliderFloat("Release ms", &rel, 10.0f, 3000.0f, "%.0f")) g_audition_release_ms.store(rel);
+
   ImGui::SeparatorText("Direct param edit (syncs to menu)");
   bool changed = false;
   int  cv_prob, trig_prob, trig_len, steps, octs, start_note, clk_div;
@@ -564,6 +599,77 @@ static void OnKey(GLFWwindow* win, int key, int /*sc*/, int action, int /*mods*/
 }
 
 // ============================================================
+//  Audition audio callback
+// ============================================================
+static int AuditionCb(const void* /*input*/, void* output,
+                      unsigned long frames,
+                      const PaStreamCallbackTimeInfo* /*time*/,
+                      PaStreamCallbackFlags /*flags*/,
+                      void* /*user*/) {
+  auto* out = static_cast<float*>(output);
+
+  if (!g_audition_enabled.load(std::memory_order_relaxed)) {
+    std::memset(output, 0, sizeof(float) * frames * 2);
+    return paContinue;
+  }
+
+  const uint16_t dac        = g_disp_dac.load(std::memory_order_relaxed);
+  const bool     trig       = g_disp_trig.load(std::memory_order_relaxed);
+  const float    volume     = g_audition_volume.load(std::memory_order_relaxed);
+  const float    attack_ms  = g_audition_attack_ms.load(std::memory_order_relaxed);
+  const float    release_ms = g_audition_release_ms.load(std::memory_order_relaxed);
+
+  // Edge-detect trig → env state transitions
+  if (trig && !g_audio_prev_trig)        g_audio_env_stage = EnvStage::Attack;
+  else if (!trig && g_audio_prev_trig)   g_audio_env_stage = EnvStage::Release;
+  g_audio_prev_trig = trig;
+
+  // DAC → MIDI → Hz. Matches main.py's note*68 convention: 68 DAC units
+  // per semitone. Base offset of 24 puts the lowest reachable note at
+  // C1 (~32.7 Hz), giving headroom for the full 5-octave scale span.
+  const float midi      = 24.0f + static_cast<float>(dac) / 68.0f;
+  const float freq_hz   = 440.0f * std::pow(2.0f, (midi - 69.0f) / 12.0f);
+  const float phase_inc = kTwoPi * freq_hz / static_cast<float>(kAudioSampleRate);
+
+  const float atk_per_s = 1.0f / (attack_ms  * 0.001f * kAudioSampleRate);
+  const float rel_per_s = 1.0f / (release_ms * 0.001f * kAudioSampleRate);
+
+  for (unsigned long i = 0; i < frames; ++i) {
+    switch (g_audio_env_stage) {
+      case EnvStage::Attack:
+        g_audio_env += atk_per_s;
+        if (g_audio_env >= 1.0f) {
+          g_audio_env       = 1.0f;
+          g_audio_env_stage = EnvStage::Sustain;
+        }
+        break;
+      case EnvStage::Sustain:
+        g_audio_env = 1.0f;
+        break;
+      case EnvStage::Release:
+        g_audio_env -= rel_per_s;
+        if (g_audio_env <= 0.0f) {
+          g_audio_env       = 0.0f;
+          g_audio_env_stage = EnvStage::Idle;
+        }
+        break;
+      case EnvStage::Idle:
+      default:
+        g_audio_env = 0.0f;
+        break;
+    }
+
+    const float s = std::sin(g_audio_phase) * g_audio_env * volume;
+    out[2 * i + 0] = s;
+    out[2 * i + 1] = s;
+    g_audio_phase += phase_inc;
+    if (g_audio_phase >  kTwoPi) g_audio_phase -= kTwoPi;
+    if (g_audio_phase < -kTwoPi) g_audio_phase += kTwoPi;
+  }
+  return paContinue;
+}
+
+// ============================================================
 //  Entry
 // ============================================================
 int main() {
@@ -590,6 +696,24 @@ int main() {
   ImGui_ImplGlfw_InitForOpenGL(win, true);
   ImGui_ImplOpenGL3_Init("#version 150");
 
+  // PortAudio for audition. Stream always runs (callback emits silence
+  // when audition is disabled) — simpler than opening/closing on demand.
+  bool audio_ok = false;
+  PaStream* audio_stream = nullptr;
+  if (Pa_Initialize() == paNoError) {
+    PaError err = Pa_OpenDefaultStream(&audio_stream,
+                                       0, 2, paFloat32,
+                                       kAudioSampleRate, 256,
+                                       AuditionCb, nullptr);
+    if (err == paNoError && Pa_StartStream(audio_stream) == paNoError) {
+      audio_ok = true;
+    } else {
+      std::fprintf(stderr, "PortAudio failed: %s\n", Pa_GetErrorText(err));
+    }
+  } else {
+    std::fprintf(stderr, "PortAudio Init failed\n");
+  }
+
   std::thread clock_thread(ClockThreadMain);
 
   while (!glfwWindowShouldClose(win)) {
@@ -611,6 +735,12 @@ int main() {
 
   g_app_quitting.store(true);
   clock_thread.join();
+
+  if (audio_ok && audio_stream) {
+    Pa_StopStream(audio_stream);
+    Pa_CloseStream(audio_stream);
+  }
+  Pa_Terminate();
 
   ImGui_ImplOpenGL3_Shutdown();
   ImGui_ImplGlfw_Shutdown();
