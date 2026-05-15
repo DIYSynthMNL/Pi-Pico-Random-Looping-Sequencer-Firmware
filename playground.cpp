@@ -198,6 +198,10 @@ static void DoTapTempo();
 // list views which exist in this file lower down). PlaybackView's
 // OnPress wants to push the main view — go through this trampoline.
 static seq::View* MainView();
+// MainMenuView::OnPress toggles g_run_item directly (it's already
+// under the mutex from DoEncoderPress) and then fires OnMenuCommit
+// to sync into engine params — declared below, used above.
+static void OnMenuCommit(void*);
 
 // ============================================================
 //  Scale rebuild
@@ -513,8 +517,15 @@ class MainMenuView : public seq::View {
   }
 
   void OnPress() override {
+    // NOTE: OnPress runs *under* g_mutex (acquired by DoEncoderPress).
+    // We must not call DoTogglePlay() or DoOpenSubmenu() here — they
+    // try to re-lock the same non-recursive mutex on the same thread,
+    // which is UB on std::mutex and locks up the app on macOS.
     if (highlighted_ == 0) {
-      DoTogglePlay();
+      if (g_run_item) {
+        g_run_item->set_value(!g_run_item->value());
+        OnMenuCommit(nullptr);
+      }
       return;
     }
     seq::MenuListView* targets[4] = {
