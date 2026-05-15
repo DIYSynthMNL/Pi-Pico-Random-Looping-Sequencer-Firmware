@@ -533,9 +533,12 @@ void SingleSelectEditView::OnRotate(int delta) {
   draft_index_ += delta;
   if (draft_index_ < 0)                       draft_index_ = 0;
   if (draft_index_ >= item_->option_count())  draft_index_ = item_->option_count() - 1;
-  const int total_lines = 4;
-  if (draft_index_ > scroll_start_ + (total_lines - 1)) ++scroll_start_;
-  if (draft_index_ < scroll_start_)                     --scroll_start_;
+  // Visible rows must match Draw(): 3 when a preview strip is drawn at
+  // the bottom (e.g. scale picker), 4 otherwise. Mismatch here caused
+  // the highlight to scroll off-screen under the preview.
+  const int total_lines = item_->preview_fn() ? 3 : 4;
+  while (draft_index_ > scroll_start_ + (total_lines - 1)) ++scroll_start_;
+  while (draft_index_ < scroll_start_)                     --scroll_start_;
   if (scroll_start_ < 0) scroll_start_ = 0;
 }
 

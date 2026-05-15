@@ -371,11 +371,11 @@ class SingleSelectEditView : public View {
         draft_index_(item->selected_index()),
         scroll_start_(0) {
     // Position the scroll window so the draft (currently-selected) item
-    // is visible from the first frame. Without this the highlight is
-    // invisible until the user rotates enough to drag the window to it.
-    constexpr int kTotalLines = 4;
-    if (draft_index_ > kTotalLines - 1) {
-      scroll_start_ = draft_index_ - (kTotalLines - 1);
+    // is visible from the first frame. Visible rows = 3 if a preview
+    // strip is drawn at the bottom (e.g. scale picker), 4 otherwise.
+    const int total_lines = item->preview_fn() ? 3 : 4;
+    if (draft_index_ > total_lines - 1) {
+      scroll_start_ = draft_index_ - (total_lines - 1);
     }
   }
   void Draw(FakeOled& oled) const override;
