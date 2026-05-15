@@ -395,15 +395,18 @@ class PlaybackView : public seq::View {
   mutable int      scope_filled_          = 0;
 
   // Called once per Draw — pushes step into trail/scope buffers if the
-  // playhead has advanced. Keeping this in one place means every layout
-  // sees a consistent snapshot.
+  // playhead has advanced. ALSO owns the step-pulse animation timestamp
+  // and the shared last_step_seen_ counter (previously only DrawGrid
+  // touched last_step_seen_, which meant trail/scope thought the step
+  // changed every frame in non-Grid layouts → trail collapsed and
+  // scope sampled at 60 Hz instead of once per step).
   void UpdateTrailAndScope() const {
     const int step = g_disp_step.load();
     if (step == last_step_seen_) return;
-    // Shift trail right, prepend current.
+    last_step_seen_        = step;
+    step_pulse_started_ms_ = NowMs();
     for (int i = kTrailLen - 1; i > 0; --i) trail_[i] = trail_[i - 1];
     trail_[0] = step;
-    // Scope: push current CV + trig.
     scope_cv_[scope_head_]   = g_disp_dac.load();
     scope_trig_[scope_head_] = g_disp_trig.load() ? 1 : 0;
     scope_head_ = (scope_head_ + 1) % kScopeLen;
@@ -484,11 +487,8 @@ class PlaybackView : public seq::View {
     const int  step  = g_disp_step.load();
     const int  steps = g_steps_item ? g_steps_item->value() : 16;
 
-    // Detect step advance — used for the pulse halo below.
-    if (step != last_step_seen_) {
-      step_pulse_started_ms_ = NowMs();
-      last_step_seen_ = step;
-    }
+    // Pulse-age comes from step_pulse_started_ms_, which is updated by
+    // UpdateTrailAndScope() at top of Draw() on every step change.
     const uint32_t pulse_age = NowMs() - step_pulse_started_ms_;
 
     constexpr int kCellW   = 16;
@@ -679,12 +679,14 @@ class PlaybackView : public seq::View {
       oled.Text(20, 28, "waiting for clock");
       return;
     }
-    // Find min/max over the filled region.
+    // Y-axis range = the pattern's pitch range (stable across pattern
+    // wraps), not the rolling buffer's range (which jumps when the
+    // sequence wraps and brings new lows/highs into the window).
+    const int steps_now = g_steps_item ? g_steps_item->value() : 16;
     uint16_t lo = 4095, hi = 0;
-    for (int n = 0; n < scope_filled_; ++n) {
-      const int idx = (scope_head_ - 1 - n + kScopeLen) % kScopeLen;
-      if (scope_cv_[idx] < lo) lo = scope_cv_[idx];
-      if (scope_cv_[idx] > hi) hi = scope_cv_[idx];
+    for (int i = 0; i < steps_now; ++i) {
+      if (g_disp_cv[i] < lo) lo = g_disp_cv[i];
+      if (g_disp_cv[i] > hi) hi = g_disp_cv[i];
     }
     if (hi <= lo) hi = lo + 1;
     const int kH = kBot - kTop;
