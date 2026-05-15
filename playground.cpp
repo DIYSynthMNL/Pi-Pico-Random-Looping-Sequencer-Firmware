@@ -245,9 +245,22 @@ static void BuildMenu() {
 //  Clock thread
 // ============================================================
 static void ClockThreadMain() {
+  // 1ms tick loop. Each iteration:
+  //   1) Service async requests (reset, digital-in pulse, manual clock).
+  //   2) If the internal clock is running and now >= next_edge_time,
+  //      emit one clock edge and advance the next-edge timestamp.
+  //   3) Always call Sequencer::Tick() so scheduled sub-edges fire on
+  //      time and the trigger-off timer runs while paused.
+  //   4) Refresh the display atomics.
+  //
+  // The bug this replaces: previously Tick was only called at clock
+  // edges (every half-period). Sub-edges scheduled by clock-multiplier
+  // > 1 between edges accumulated and fired all at once at the next
+  // Tick — "burst then gap" instead of even sub-step spacing.
   using clock_t = std::chrono::steady_clock;
-  auto next = clock_t::now();
-  bool clock_high = false;
+  auto next_edge_time = clock_t::now();
+  bool clock_high     = false;
+  bool was_running    = false;
 
   while (!g_app_quitting.load()) {
     if (g_reset_request.exchange(false)) {
@@ -276,43 +289,40 @@ static void ClockThreadMain() {
       {
         std::lock_guard<std::mutex> lk(g_mutex);
         g_sequencer.OnClockEdge(false, t1);
-        const seq::Voice& v = g_sequencer.voice(0);
-        g_disp_step.store(v.last_played_step());
-        g_disp_dac.store(v.last_dac());
-        g_disp_trig.store(v.trig_active());
-        std::memcpy(g_disp_cv,        v.cv_sequence(),      sizeof(g_disp_cv));
-        std::memcpy(g_disp_trig_grid, v.trigger_sequence(), sizeof(g_disp_trig_grid));
       }
     }
 
-    if (!g_clock_running.load()) {
-      const auto now_ms = static_cast<uint32_t>(
-          std::chrono::duration_cast<std::chrono::milliseconds>(
-              clock_t::now().time_since_epoch()).count());
-      {
-        std::lock_guard<std::mutex> lk(g_mutex);
-        g_sequencer.Tick(now_ms);
-        g_disp_trig.store(g_sequencer.voice(0).trig_active());
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(5));
-      next = clock_t::now();
-      continue;
-    }
-
-    const int   bpm         = g_bpm.load();
-    const int   period_ms   = (bpm > 0) ? (60000 / bpm) : 1000;
-    const auto  half_period = std::chrono::milliseconds(period_ms / 2);
-
-    next += half_period;
-    std::this_thread::sleep_until(next);
-
-    clock_high = !clock_high;
+    const auto now    = clock_t::now();
     const auto now_ms = static_cast<uint32_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
-            clock_t::now().time_since_epoch()).count());
+            now.time_since_epoch()).count());
+    const bool running = g_clock_running.load();
+
+    // Edge-trigger when the internal clock flips on: schedule first
+    // rising edge a half-period out so it starts cleanly.
+    if (running && !was_running) {
+      const int bpm       = g_bpm.load();
+      const int period_ms = (bpm > 0) ? (60000 / bpm) : 1000;
+      next_edge_time = now + std::chrono::milliseconds(period_ms / 2);
+      clock_high     = false;
+    }
+    was_running = running;
+
     {
       std::lock_guard<std::mutex> lk(g_mutex);
-      g_sequencer.OnClockEdge(clock_high, now_ms);
+
+      // Emit clock edges based on absolute time (allows catching up if
+      // we ever sleep a bit long).
+      if (running) {
+        while (now >= next_edge_time) {
+          clock_high = !clock_high;
+          g_sequencer.OnClockEdge(clock_high, now_ms);
+          const int bpm       = g_bpm.load();
+          const int period_ms = (bpm > 0) ? (60000 / bpm) : 1000;
+          next_edge_time += std::chrono::milliseconds(period_ms / 2);
+        }
+      }
+
       g_sequencer.Tick(now_ms);
 
       const seq::Voice& v = g_sequencer.voice(0);
@@ -322,6 +332,8 @@ static void ClockThreadMain() {
       std::memcpy(g_disp_cv,        v.cv_sequence(),      sizeof(g_disp_cv));
       std::memcpy(g_disp_trig_grid, v.trigger_sequence(), sizeof(g_disp_trig_grid));
     }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 }
 
