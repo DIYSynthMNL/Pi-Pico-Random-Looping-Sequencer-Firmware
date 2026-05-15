@@ -12,6 +12,7 @@ void Voice::Init(const uint16_t* scale, int scale_length) {
   }
   next_step_           = 0;
   last_played_step_    = 0;
+  pendulum_dir_        = 1;
   trigger_active_      = false;
   trigger_start_ticks_ = 0;
   trig_length_ms_      = 0;
@@ -25,6 +26,7 @@ void Voice::Init(const uint16_t* scale, int scale_length) {
 void Voice::Reset() {
   next_step_        = 0;
   last_played_step_ = 0;
+  pendulum_dir_     = 1;
 }
 
 void Voice::ClearCv(const uint16_t* scale, int scale_length) {
@@ -121,7 +123,35 @@ bool Voice::Advance(uint32_t now_ms, uint32_t gate_ms,
   }
 
   last_played_step_ = next_step_;
-  next_step_        = (next_step_ + 1) % steps;
+
+  // Pick the *next* step based on direction. The step we just played is
+  // last_played_step_; this advances next_step_ for the upcoming Advance().
+  switch (params_.step_direction) {
+    case StepDirection::Reverse: {
+      next_step_ = (next_step_ - 1 + steps) % steps;
+      break;
+    }
+    case StepDirection::Pendulum: {
+      // Bounce off endpoints without playing them twice in a row.
+      // With steps=1 (degenerate) just stay put.
+      if (steps <= 1) { next_step_ = 0; break; }
+      int n = next_step_ + pendulum_dir_;
+      if (n >= steps) { pendulum_dir_ = -1; n = steps - 2; }
+      else if (n < 0) { pendulum_dir_ =  1; n = 1; }
+      next_step_ = n;
+      break;
+    }
+    case StepDirection::Random: {
+      if (steps <= 1) { next_step_ = 0; break; }
+      std::uniform_int_distribution<int> dist(0, steps - 1);
+      next_step_ = dist(rng_);
+      break;
+    }
+    case StepDirection::Forward:
+    default:
+      next_step_ = (next_step_ + 1) % steps;
+      break;
+  }
   return true;
 }
 

@@ -42,6 +42,18 @@ enum class CvSource : uint8_t {
   Tuning = 2,
 };
 
+// How the playhead walks the step buffer each Advance().
+//   Forward  — 0, 1, 2, ..., N-1, 0, 1, ...
+//   Reverse  — N-1, N-2, ..., 0, N-1, ...
+//   Pendulum — 0, 1, 2, ..., N-1, N-2, ..., 1, 0, 1, ... (no double endpoints)
+//   Random   — uniform over [0, N-1]
+enum class StepDirection : uint8_t {
+  Forward  = 0,
+  Reverse  = 1,
+  Pendulum = 2,
+  Random   = 3,
+};
+
 struct VoiceParams {
   int  number_of_steps    = 16;
   int  cv_change_pct      = 0;
@@ -58,7 +70,8 @@ struct VoiceParams {
   int  clock_divider      = 1;
   int  clock_multiplier   = 1;
 
-  CvSource cv_source      = CvSource::Normal;
+  CvSource      cv_source      = CvSource::Normal;
+  StepDirection step_direction = StepDirection::Forward;
 };
 
 class Voice {
@@ -125,6 +138,12 @@ class Voice {
 
   int   next_step_                = 0;
   int   last_played_step_         = 0;
+
+  // Pendulum direction (+1 or -1). Flips when next_step_ hits the
+  // endpoints. Forward/Reverse/Random ignore this. Reset to +1 on
+  // Init/Reset so a paused-and-resumed voice doesn't carry a stale
+  // direction from a previous mode.
+  int   pendulum_dir_             = 1;
 
   bool     trigger_active_        = false;
   uint32_t trigger_start_ticks_   = 0;

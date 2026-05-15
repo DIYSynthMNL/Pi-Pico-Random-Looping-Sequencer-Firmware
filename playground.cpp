@@ -110,6 +110,10 @@ constexpr int          kCvSourceCount     = 3;
 constexpr const char*  kDigInModeNames[]  = { "None", "Reset", "RunStop", "Freeze" };
 constexpr int          kDigInModeCount    = 4;
 
+// StepDirection labels — index = enum value (matches seq::StepDirection).
+constexpr const char*  kStepDirNames[]    = { "Fwd", "Rev", "Pend", "Rand" };
+constexpr int          kStepDirCount      = 4;
+
 // Step rate options — how long each step is relative to the incoming
 // clock. Replaces the v0.8 "ClkDiv" / "ClkMult" pair. Internally maps
 // to (divider, multiplier) — the engine still uses those fields but
@@ -162,6 +166,7 @@ seq::ActionItem*          g_clear_trig_item   = nullptr;  // audit 2a
 seq::ToggleItem*          g_run_item          = nullptr;  // audit 2f
 seq::GridSelectItem*      g_cv_source_item    = nullptr;
 seq::GridSelectItem*      g_dig_in_item       = nullptr;  // audit 2e
+seq::GridSelectItem*      g_step_dir_item     = nullptr;
 
 // Stateless — one shared instance for every submenu's "< Back" row.
 seq::BackItem             g_back_item;
@@ -588,6 +593,7 @@ static void SaveStateLocked() {
   std::fprintf(f, "trig_length_pct=%d\n", g_trig_length_item? g_trig_length_item->value() : 50);
   std::fprintf(f, "cv_source_idx=%d\n",   g_cv_source_item  ? g_cv_source_item->selected_index() : 0);
   std::fprintf(f, "dig_in_idx=%d\n",      g_dig_in_item     ? g_dig_in_item->selected_index() : 1);
+  std::fprintf(f, "step_dir_idx=%d\n",    g_step_dir_item   ? g_step_dir_item->selected_index() : 0);
   // Sim
   std::fprintf(f, "clock_running=%d\n",        g_clock_running.load() ? 1 : 0);
   std::fprintf(f, "bpm=%d\n",                  g_bpm.load());
@@ -647,6 +653,7 @@ static void LoadStateLocked() {
     else if (!std::strcmp(key, "trig_length_pct")) { if (g_trig_length_item)g_trig_length_item->set_value(i()); }
     else if (!std::strcmp(key, "cv_source_idx"))   { if (g_cv_source_item)  g_cv_source_item->set_selected_index(i()); }
     else if (!std::strcmp(key, "dig_in_idx"))      { if (g_dig_in_item)     g_dig_in_item->set_selected_index(i()); }
+    else if (!std::strcmp(key, "step_dir_idx"))    { if (g_step_dir_item)   g_step_dir_item->set_selected_index(i()); }
     else if (!std::strcmp(key, "clock_running"))   { g_clock_running.store(i() != 0); }
     else if (!std::strcmp(key, "bpm"))             { g_bpm.store(i()); }
     else if (!std::strcmp(key, "audition_enabled")) { g_audition_enabled.store(i() != 0); }
@@ -825,6 +832,8 @@ static void OnMenuCommit(void* /*user*/) {
   }
   g_vparams.cv_source          = static_cast<seq::CvSource>(
       g_cv_source_item->selected_index());
+  g_vparams.step_direction     = static_cast<seq::StepDirection>(
+      g_step_dir_item->selected_index());
 
   g_sparams.enabled            = g_run_item->value();
   g_sparams.digital_in_mode    = static_cast<seq::DigitalInMode>(
@@ -902,12 +911,16 @@ static void BuildMenu() {
       "DigIn", kDigInModeNames, kDigInModeCount,
       static_cast<int>(seq::DigitalInMode::Reset),
       /*cols=*/2);
+  g_step_dir_item     = new seq::GridSelectItem(
+      "StepDir", kStepDirNames, kStepDirCount,
+      static_cast<int>(seq::StepDirection::Forward),
+      /*cols=*/2);
 
   // ---- Category submenus ----
   // Each submenu opens with a "< Back" row so the navigation is
   // discoverable (long-press still works as the shortcut).
   g_clock_items = {
-    &g_back_item, g_steps_item, g_step_rate_item, g_dig_in_item,
+    &g_back_item, g_steps_item, g_step_rate_item, g_step_dir_item, g_dig_in_item,
   };
   g_pitch_items = {
     &g_back_item, g_scale_item, g_octaves_item, g_start_note_item, g_cv_source_item,
