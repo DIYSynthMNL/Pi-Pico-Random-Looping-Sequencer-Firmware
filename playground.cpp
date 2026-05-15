@@ -110,6 +110,23 @@ constexpr int          kCvSourceCount     = 3;
 constexpr const char*  kDigInModeNames[]  = { "None", "Reset", "RunStop", "Freeze" };
 constexpr int          kDigInModeCount    = 4;
 
+// Step rate options — how long each step is relative to the incoming
+// clock. Replaces the v0.8 "ClkDiv" / "ClkMult" pair. Internally maps
+// to (divider, multiplier) — the engine still uses those fields but
+// users never see them as separate numbers.
+constexpr const char*  kStepRateNames[]   = {
+  "/8", "/4", "/2", "x1", "x2", "x3", "x4", "x6", "x8"
+};
+constexpr int          kStepRateCount     = 9;
+constexpr int          kStepRateDefault   = 3;   // "x1"
+struct StepRateMapping { int div; int mult; };
+constexpr StepRateMapping kStepRateMap[kStepRateCount] = {
+  {8, 1}, {4, 1}, {2, 1},        // /8 /4 /2
+  {1, 1},                         // x1 (default)
+  {1, 2}, {1, 3}, {1, 4},        // x2 x3 x4
+  {1, 6}, {1, 8},                // x6 x8 (triplet 16 / 32nd)
+};
+
 // Menu items + view stack — hierarchical now.
 //
 //   PlaybackView  (root, depth 1)
@@ -138,8 +155,8 @@ seq::NumericalItem*       g_trig_length_item  = nullptr;
 seq::NumericalItem*       g_steps_item        = nullptr;
 seq::NumericalItem*       g_octaves_item      = nullptr;
 seq::NumericalItem*       g_start_note_item   = nullptr;
-seq::NumericalItem*       g_clk_div_item      = nullptr;  // audit 2d
-seq::NumericalItem*       g_clk_mult_item     = nullptr;  // task A8
+// Replaced ClkDiv + ClkMult with a single Step rate SingleSelect.
+seq::SingleSelectItem*    g_step_rate_item    = nullptr;
 seq::ActionItem*          g_clear_cv_item     = nullptr;  // audit 2a
 seq::ActionItem*          g_clear_trig_item   = nullptr;  // audit 2a
 seq::ToggleItem*          g_run_item          = nullptr;  // audit 2f
@@ -478,8 +495,13 @@ static void OnMenuCommit(void* /*user*/) {
   g_vparams.number_of_steps    = g_steps_item->value();
   g_octaves                    = g_octaves_item->value();
   g_starting_note              = g_start_note_item->value();
-  g_vparams.clock_divider      = g_clk_div_item->value();
-  g_vparams.clock_multiplier   = g_clk_mult_item->value();
+  {
+    const int rate_idx = g_step_rate_item->selected_index();
+    const auto& m = kStepRateMap[
+        (rate_idx >= 0 && rate_idx < kStepRateCount) ? rate_idx : kStepRateDefault];
+    g_vparams.clock_divider    = m.div;
+    g_vparams.clock_multiplier = m.mult;
+  }
   g_vparams.cv_source          = static_cast<seq::CvSource>(
       g_cv_source_item->selected_index());
 
@@ -515,8 +537,8 @@ static void BuildMenu() {
                                                seq::kMinOctaves,
                                                seq::kMaxOctaves, 1);
   g_start_note_item   = new seq::NumericalItem("Start note",0,  0, 36, 1);
-  g_clk_div_item      = new seq::NumericalItem("ClkDiv",   1,  1, 16, 1);
-  g_clk_mult_item     = new seq::NumericalItem("ClkMult",  1,  1, 16, 1);
+  g_step_rate_item    = new seq::SingleSelectItem(
+      "Step rate", kStepRateNames, kStepRateCount, kStepRateDefault);
   g_clear_cv_item     = new seq::ActionItem("Clear CV",   &ActionClearCv,       nullptr);
   g_clear_trig_item   = new seq::ActionItem("Clear Trig", &ActionClearTriggers, nullptr);
   g_cv_source_item    = new seq::SingleSelectItem(
@@ -527,7 +549,7 @@ static void BuildMenu() {
 
   // ---- Category submenus ----
   g_clock_items = {
-    g_steps_item, g_clk_div_item, g_clk_mult_item, g_dig_in_item,
+    g_steps_item, g_step_rate_item, g_dig_in_item,
   };
   g_pitch_items = {
     g_scale_item, g_octaves_item, g_start_note_item, g_cv_source_item,
@@ -1058,7 +1080,7 @@ static void RenderParamsWindow() {
   ImGui::Begin("Params (sim direct edit)");
 
   bool changed = false;
-  int  cv_prob, trig_prob, trig_len, steps, octs, start_note, clk_div, clk_mult;
+  int  cv_prob, trig_prob, trig_len, steps, octs, start_note, step_rate_idx;
   bool play_on;
   int  cv_source_idx, dig_in_idx, scale_idx;
   {
@@ -1070,8 +1092,7 @@ static void RenderParamsWindow() {
     steps         = g_steps_item->value();
     octs          = g_octaves_item->value();
     start_note    = g_start_note_item->value();
-    clk_div       = g_clk_div_item->value();
-    clk_mult      = g_clk_mult_item->value();
+    step_rate_idx = g_step_rate_item->selected_index();
     cv_source_idx = g_cv_source_item->selected_index();
     dig_in_idx    = g_dig_in_item->selected_index();
     scale_idx     = g_scale_item->selected_index();
@@ -1125,9 +1146,17 @@ static void RenderParamsWindow() {
   }
 
   ImGui::SeparatorText("Clock");
-  changed |= ImGui::SliderInt("Steps",            &steps,    seq::kMinSteps, seq::kMaxSteps);
-  changed |= ImGui::SliderInt("Clock divider",    &clk_div,  1, 16);
-  changed |= ImGui::SliderInt("Clock multiplier", &clk_mult, 1, 16);
+  changed |= ImGui::SliderInt("Steps", &steps, seq::kMinSteps, seq::kMaxSteps);
+  if (ImGui::BeginCombo("Step rate", kStepRateNames[step_rate_idx])) {
+    for (int i = 0; i < kStepRateCount; ++i) {
+      bool sel = (i == step_rate_idx);
+      if (ImGui::Selectable(kStepRateNames[i], sel)) {
+        step_rate_idx = i;
+        changed = true;
+      }
+    }
+    ImGui::EndCombo();
+  }
   if (ImGui::BeginCombo("Digital-in mode", kDigInModeNames[dig_in_idx])) {
     for (int i = 0; i < kDigInModeCount; ++i) {
       bool sel = (i == dig_in_idx);
@@ -1169,8 +1198,7 @@ static void RenderParamsWindow() {
     g_steps_item     ->set_value(steps);
     g_octaves_item   ->set_value(octs);
     g_start_note_item->set_value(start_note);
-    g_clk_div_item   ->set_value(clk_div);
-    g_clk_mult_item  ->set_value(clk_mult);
+    g_step_rate_item ->set_selected_index(step_rate_idx);
     g_cv_source_item ->set_selected_index(cv_source_idx);
     g_dig_in_item    ->set_selected_index(dig_in_idx);
     OnMenuCommit(nullptr);
@@ -1496,9 +1524,8 @@ int main() {
   delete g_scale_item;       delete g_cv_prob_item;
   delete g_trig_prob_item;   delete g_trig_length_item;
   delete g_steps_item;       delete g_octaves_item;
-  delete g_start_note_item;  delete g_clk_div_item;
-  delete g_clk_mult_item;    delete g_clear_cv_item;
-  delete g_clear_trig_item;
+  delete g_start_note_item;  delete g_step_rate_item;
+  delete g_clear_cv_item;    delete g_clear_trig_item;
   delete g_run_item;         delete g_cv_source_item;
   delete g_dig_in_item;
   return 0;

@@ -69,6 +69,11 @@ class Sequencer {
   // a 50%-duty square clock instead of spacing them across the period.
   bool      step_changed_on_clock_pulse_ = false;
   bool      have_clock_period_           = false;
+  // True after the *second* rising edge — i.e. we've actually measured
+  // a real period between two consecutive edges. Multiplier sub-edges
+  // are gated on this so the very first edge doesn't fire bogus sub-
+  // edges using the kDefaultClockMs guess.
+  bool      has_measured_period_         = false;
   uint32_t  last_rising_ms_              = 0;
   uint32_t  clock_period_ms_             = kDefaultClockMs;
 
