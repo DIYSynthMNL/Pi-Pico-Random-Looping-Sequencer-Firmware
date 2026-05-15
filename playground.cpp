@@ -357,17 +357,26 @@ class PlaybackView : public seq::View {
     if (stack()) stack()->Push(MainView());
   }
 
-  // Long-press at the root cycles through playback layouts (instead of
-  // the default View::OnLongPress, which pops the stack — a no-op at
-  // depth 1 anyway).
-  void OnLongPress() override { CycleLayout(); }
+  // Rotate at the root cycles through playback layouts. Positive delta
+  // = next layout, negative = previous. (Long-press used to do this,
+  // but Rex's encoder model assigns long-press to "back" — and the
+  // root has nowhere to back out to.)
+  void OnRotate(int delta) override {
+    if (delta > 0) CycleLayout(/*forward=*/true);
+    else if (delta < 0) CycleLayout(/*forward=*/false);
+  }
+
+  // Long-press is a no-op at depth 1 (nothing to pop to).
+  void OnLongPress() override {}
 
   // Exposed so the keyboard handler / Encoder & Inputs window can also
-  // cycle layouts without going through the long-press path.
-  void CycleLayout() {
-    layout_ = static_cast<Layout>(
-        (static_cast<uint8_t>(layout_) + 1u) %
-        static_cast<uint8_t>(Layout::Count));
+  // cycle layouts without going through the rotation path.
+  void CycleLayout(bool forward = true) {
+    const int count = static_cast<int>(Layout::Count);
+    const int cur   = static_cast<int>(layout_);
+    const int next  = forward ? (cur + 1) % count
+                              : (cur - 1 + count) % count;
+    layout_ = static_cast<Layout>(next);
     hint_frames_remaining_ = 60;   // ~1 s at 60 fps
   }
   Layout layout() const { return layout_; }
@@ -419,19 +428,17 @@ class PlaybackView : public seq::View {
     const bool run   = g_run_item  ? g_run_item->value()    : false;
     const char* scale = (g_scale_idx >= 0 && g_scale_idx < seq::kNumScales)
                         ? seq::kScales[g_scale_idx].name : "";
-    char scale_short[8];
-    int sl = 0;
-    for (; scale[sl] && sl < 7; ++sl) scale_short[sl] = scale[sl];
-    scale_short[sl] = 0;
 
     char now_note[8];
     DacToNoteName(g_disp_dac.load(), now_note, sizeof(now_note));
 
-    // Play/Stop icon at the far left, then text.
+    // Play/Stop icon at the far left, then text. `%-6.6s` truncates the
+    // scale name to exactly 6 chars (was 7 — overflowed into the
+    // direction icon at x=112 for long scale names like "Pentatonic").
     icons::Draw(oled, run ? icons::kPlay : icons::kStop, 1, 1);
     char header[24];
-    std::snprintf(header, sizeof(header), " %-3s %-6s %02d/%02d",
-                  now_note, scale_short, step + 1, steps);
+    std::snprintf(header, sizeof(header), " %-3s %-6.6s %02d/%02d",
+                  now_note, scale, step + 1, steps);
     oled.Text(8, 1, header);
 
     // Direction indicator just to the left of the trig area. Picks an
@@ -732,21 +739,35 @@ class PlaybackView : public seq::View {
     constexpr int kBigY = 14;
     char now_note[8];
     DacToNoteName(g_disp_dac.load(), now_note, sizeof(now_note));
-    // Big note name — render glyphs 2x by stamping each pixel of the
-    // 1x text into a 2x2 block on the real oled.
+    // Big note name — 2x scale with *proportional* spacing. The bitmap
+    // font's '1' glyph has a blank leftmost column ({0x00, 0x42, 0x7F,
+    // 0x40, 0x00, 0x00}), so "C1" rendered with fixed 6-col advance
+    // shows a visible gap that reads as "C 1" — especially at 2x. We
+    // trim each glyph's blank columns and re-space with a uniform 1-col
+    // gap so adjacent glyphs touch consistently.
     {
-      seq::FakeOled tmp;
-      tmp.Clear();
-      tmp.Text(0, 0, now_note);
-      const int big_w = static_cast<int>(std::strlen(now_note)) * 6;
       const int ox = 4;
       const int oy = kBigY;
-      for (int px = 0; px < big_w; ++px) {
-        for (int py = 0; py < 8; ++py) {
-          if (tmp.buf[py * seq::FakeOled::kW + px]) {
-            oled.FillRect(ox + px * 2, oy + py * 2, 2, 2, true);
+      int pen = ox;
+      for (const char* p = now_note; *p; ++p) {
+        const uint8_t* g = seq::FakeOled::Glyph(*p);
+        int left = 6, right = -1;
+        for (int c = 0; c < 6; ++c) {
+          if (g[c] != 0) { if (c < left) left = c; if (c > right) right = c; }
+        }
+        if (right < left) {
+          pen += 3 * 2;   // empty glyph (space) — small fixed advance
+          continue;
+        }
+        for (int c = left; c <= right; ++c) {
+          const uint8_t bits = g[c];
+          for (int row = 0; row < 8; ++row) {
+            if (bits & (1u << row)) {
+              oled.FillRect(pen + (c - left) * 2, oy + row * 2, 2, 2, true);
+            }
           }
         }
+        pen += (right - left + 1) * 2 + 2;   // content + 1-col gap, ×2
       }
     }
     // Right column: BPM big-ish.
@@ -828,32 +849,25 @@ class PlaybackView : public seq::View {
         oled.Px(cx + 1, kTop - 1, true);
       }
     }
-    // Pitch range labels at the right margin.
+    // Pitch range labels — pre-v0.15.4 these sat at the right margin
+    // (x = 128 - text_w) and clobbered the rightmost step bar (cells
+    // fill x=0..127). Tuck them at the very bottom of the screen
+    // instead, below the trig row, where there's a clear horizontal
+    // band y=56..63.
     char nmin[8], nmax[8];
     DacToNoteName(lo, nmin, sizeof(nmin));
     DacToNoteName(hi, nmax, sizeof(nmax));
-    const int min_w = static_cast<int>(std::strlen(nmin)) * 6;
-    const int max_w = static_cast<int>(std::strlen(nmax)) * 6;
-    oled.FillRect(128 - max_w, kTop,     max_w, 8, false);
-    oled.Text   (128 - max_w, kTop,     nmax);
-    oled.FillRect(128 - min_w, kBot - 8, min_w, 8, false);
-    oled.Text   (128 - min_w, kBot - 8, nmin);
+    char rng[24];
+    std::snprintf(rng, sizeof(rng), "%s..%s", nmin, nmax);
+    oled.Text(0, 56, rng);
   }
 
   // ---- Idle overlay — soft "paused" hint when not running ----
-  // Subtle: a pause icon + breathing dot near top-right. Doesn't replace
-  // the layout — you still see your pattern, just dimmed-feeling.
-  void DrawIdleOverlay(seq::FakeOled& oled) const {
-    const bool run = g_run_item ? g_run_item->value() : false;
-    if (run) return;
-    // Pause glyph just left of the trig area. Breathing brightness via
-    // intermittent pixel — we don't have alpha so a slow blink suffices.
-    const uint32_t ms = NowMs();
-    const bool show = ((ms / 500) & 1) == 0;
-    if (show) {
-      icons::Draw(oled, icons::kPause, 100, 1);
-    }
-  }
+  // No-op now. Previous revisions painted a breathing pause glyph at
+  // x=100 in the header, which clobbered the "/" of the step counter
+  // ("01/16" lives at x=80..109). The kStop icon at the left edge
+  // already conveys "transport stopped" — no second indicator needed.
+  void DrawIdleOverlay(seq::FakeOled& /*oled*/) const {}
 };
 
 PlaybackView g_playback_view;
@@ -1386,7 +1400,7 @@ static void RenderOledWidget() {
     g_views.Draw(g_oled);
   }
   ImGui::SetNextWindowPos (ImVec2(10, 30),  ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSize(ImVec2(440, 350), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(710, 420), ImGuiCond_FirstUseEver);
   ImGui::Begin("OLED 128x64");
   // Tiny status banner — what view are we looking at?
   const int depth = g_views.depth();
@@ -1400,7 +1414,7 @@ static void RenderOledWidget() {
 
   ImDrawList* dl = ImGui::GetWindowDrawList();
   // Bezel — a slightly larger rounded rect framing the OLED.
-  const float scale  = 3.0f;
+  const float scale  = 5.0f;
   const float bezel  = 8.0f;
   ImVec2 cursor      = ImGui::GetCursorScreenPos();
   ImVec2 bz_p0(cursor.x, cursor.y);
