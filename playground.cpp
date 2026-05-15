@@ -1,34 +1,30 @@
 // playground.cpp
-// Native macOS simulator for the Pi-Pico Random Looping Sequencer.
+// Native macOS simulator for the generative sequencer firmware.
+//
+// Phase A: rewired to the polyphonic-ready architecture —
+// seq::Sequencer owns N voices (currently 1) and a ViewStack drives
+// hierarchical OLED navigation.
 //
 // Two ImGui windows:
-//   - "OLED 128x64"        : exact pixel-for-pixel render of what the
-//                            firmware would show on the SSD1306 — driven
-//                            by the same MainMenu class that hardware
-//                            will use. Encoder is keyboard-only (left/
-//                            right + space) since there's no physical
-//                            panel mockup in this build.
-//   - "Sequencer Controls" : direct ImGui sliders, bidirectionally synced
-//                            with the menu state. Change a slider here →
-//                            menu line updates; navigate the menu →
-//                            slider follows. Also hosts the internal BPM
-//                            clock and a non-hardware engine inspector
-//                            (mini step grid).
+//   - "OLED 128x64"        : pixel-for-pixel render of what the firmware
+//                            shows. Encoder keyboard-only: ←/→ to
+//                            rotate, Space to press, Backspace (or hold
+//                            Space) to long-press / cancel.
+//   - "Sequencer Controls" : sliders bidirectionally synced with the
+//                            menu items. Internal BPM clock, engine
+//                            inspector with mini step grid.
 //
-// Architecture (mirrors vcdo-daisy):
-//   Main thread     - GUI events, draws ImGui every frame
-//   Clock thread    - std::chrono sleep-to-next-tick, fires OnClockEdge
-//   Atomic bound    - mutex around EngineParams + menu state
-//
-// Keymap (matches the note's recommended sequencer layout):
-//   Left / Right    : encoder rotate
-//   Space           : encoder click
-//   G               : manual clock pulse
-//   S               : start/stop internal clock
-//   R               : reset engine
-//   Esc / Q         : quit
+// Keymap:
+//   ← / →     encoder rotate
+//   Space     encoder click (short press)
+//   Backspace long-press / cancel-out-of-submenu
+//   G         manual clock pulse
+//   S         start/stop internal clock
+//   R         reset transport
+//   Esc / Q   quit
 
-#include "SequencerEngine.h"
+#include "Voice.h"
+#include "Sequencer.h"
 #include "Scales.h"
 #include "FakeOled.h"
 #include "Menu.h"
@@ -40,7 +36,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -48,98 +43,93 @@
 #include <thread>
 #include <vector>
 
+namespace {
+
 // ============================================================
 //  Shared state
 // ============================================================
-namespace {
+std::mutex             g_mutex;          // guards Sequencer + Menu items + scale buffer
 
-std::mutex                 g_mutex;            // guards menu + params + engine
-rls::EngineParams          g_params;
-rls::SequencerEngine       g_engine;
+seq::Sequencer         g_sequencer;
+seq::VoiceParams       g_vparams;        // mirror of voice(0) params
+seq::SequencerParams   g_sparams;
 
-// Quantizer scale buffer the host owns
-uint16_t                   g_scale[rls::kMaxScaleNotes] = {0};
-int                        g_scale_count   = 0;
-int                        g_scale_idx     = -1;        // index into kScales
-int                        g_starting_note = 12;        // mirrors main.py
-int                        g_octaves       = 1;
+// Quantizer scale buffer the host owns.
+uint16_t               g_scale[seq::kMaxScaleNotes] = {0};
+int                    g_scale_count    = 0;
+int                    g_scale_idx      = -1;
+int                    g_starting_note  = 12;
+int                    g_octaves        = 1;
 
 // Internal clock
-std::atomic<bool>          g_clock_running{false};
-std::atomic<int>           g_bpm{60};
-std::atomic<bool>          g_manual_pulse_request{false};
-std::atomic<bool>          g_reset_request{false};
-std::atomic<bool>          g_app_quitting{false};
+std::atomic<bool>      g_clock_running{false};
+std::atomic<int>       g_bpm{60};
+std::atomic<bool>      g_manual_pulse_request{false};
+std::atomic<bool>      g_reset_request{false};
+std::atomic<bool>      g_app_quitting{false};
 
-// Display-only mirrors for ImGui rendering (avoids holding the mutex
-// per frame; torn reads are acceptable for visualization).
-std::atomic<int>           g_disp_step{0};
-std::atomic<uint16_t>      g_disp_dac{0};
-std::atomic<bool>          g_disp_trig{false};
-uint16_t                   g_disp_cv[rls::kMaxSteps]   = {0};
-uint8_t                    g_disp_trig_grid[rls::kMaxSteps] = {0};
+// Display-only mirrors for ImGui rendering (read without holding the mutex).
+std::atomic<int>       g_disp_step{0};
+std::atomic<uint16_t>  g_disp_dac{0};
+std::atomic<bool>      g_disp_trig{false};
+uint16_t               g_disp_cv[seq::kMaxSteps]      = {0};
+uint8_t                g_disp_trig_grid[seq::kMaxSteps] = {0};
 
-// OLED framebuffer (drawn by Menu, displayed by ImGui)
-rls::FakeOled              g_oled;
+seq::FakeOled          g_oled;
 
-// ============================================================
-//  Menu + submenus
-// ============================================================
-// The submenus need a stable scale-name list — built once from Scales.h.
-std::vector<const char*>   g_scale_names;
+// CV source labels — index = enum value.
+constexpr const char*  kCvSourceNames[] = { "Normal", "Test", "Tuning" };
+constexpr int          kCvSourceCount   = 3;
 
-// CV-source menu options (in CvSource enum order — index = enum value).
-constexpr const char* kCvSourceNames[] = { "Normal", "Test", "Tuning" };
-constexpr int         kCvSourceCount   = 3;
+// Menu items + view stack
+std::vector<const char*>  g_scale_names;
+seq::ViewStack            g_views;
+seq::MenuListView         g_root_view;
 
-rls::MainMenu                          g_menu;
-rls::SingleSelectVerticalScrollMenu*   g_scale_menu        = nullptr;
-rls::NumericalValueRangeMenu*          g_cv_prob_menu      = nullptr;
-rls::NumericalValueRangeMenu*          g_trig_prob_menu    = nullptr;
-rls::NumericalValueRangeMenu*          g_trig_length_menu  = nullptr;
-rls::NumericalValueRangeMenu*          g_steps_menu        = nullptr;
-rls::NumericalValueRangeMenu*          g_octaves_menu      = nullptr;
-rls::NumericalValueRangeMenu*          g_start_note_menu   = nullptr;
-rls::ToggleMenu*                       g_cv_erase_menu     = nullptr;
-rls::ToggleMenu*                       g_trig_erase_menu   = nullptr;
-rls::SingleSelectVerticalScrollMenu*   g_cv_source_menu    = nullptr;
-std::vector<rls::Submenu*>             g_submenus;
+seq::SingleSelectItem*    g_scale_item        = nullptr;
+seq::NumericalItem*       g_cv_prob_item      = nullptr;
+seq::NumericalItem*       g_trig_prob_item    = nullptr;
+seq::NumericalItem*       g_trig_length_item  = nullptr;
+seq::NumericalItem*       g_steps_item        = nullptr;
+seq::NumericalItem*       g_octaves_item      = nullptr;
+seq::NumericalItem*       g_start_note_item   = nullptr;
+seq::ToggleItem*          g_cv_erase_item     = nullptr;
+seq::ToggleItem*          g_trig_erase_item   = nullptr;
+seq::SingleSelectItem*    g_cv_source_item    = nullptr;
+std::vector<seq::MenuItem*> g_items;
 
 }  // namespace
 
 // ============================================================
-//  Scale rebuild — host responsibility
+//  Scale rebuild
 // ============================================================
 static void RebuildScale_locked() {
-  if (g_scale_idx < 0 || g_scale_idx >= rls::kNumScales) g_scale_idx = 0;
-  g_scale_count = rls::BuildScale(rls::kScales[g_scale_idx],
+  if (g_scale_idx < 0 || g_scale_idx >= seq::kNumScales) g_scale_idx = 0;
+  g_scale_count = seq::BuildScale(seq::kScales[g_scale_idx],
                                   g_starting_note + 12,
                                   g_octaves, g_scale);
-  g_params.current_12bit_scale = g_scale;
-  g_params.scale_length        = g_scale_count;
+  g_sparams.scale        = g_scale;
+  g_sparams.scale_length = g_scale_count;
+  g_sequencer.SetParams(g_sparams);
 }
 
 // ============================================================
-//  Menu commit callback — mirrors update_sequencer_values() in main.py
+//  Menu commit callback — sync menu items into engine params
 // ============================================================
 static void OnMenuCommit(void* /*user*/) {
-  // Mutex is NOT held here — host called via OnPress already. The host
-  // thread doing the OnPress did so under g_mutex already. So we just
-  // pull values straight from submenus.
-  const int new_scale_idx = g_scale_menu->selected_index();
-  if (new_scale_idx != g_scale_idx) g_scale_idx = new_scale_idx;
+  g_scale_idx                  = g_scale_item->selected_index();
+  g_vparams.cv_change_pct      = g_cv_prob_item->value();
+  g_vparams.trig_change_pct    = g_trig_prob_item->value();
+  g_vparams.trig_length_pct    = g_trig_length_item->value();
+  g_vparams.number_of_steps    = g_steps_item->value();
+  g_octaves                    = g_octaves_item->value();
+  g_starting_note              = g_start_note_item->value();
+  g_vparams.is_cv_erase        = g_cv_erase_item->value();
+  g_vparams.is_trig_erase      = g_trig_erase_item->value();
+  g_vparams.cv_source          = static_cast<seq::CvSource>(
+      g_cv_source_item->selected_index());
 
-  g_params.cv_probability_of_change   = g_cv_prob_menu->selected();
-  g_params.trig_probability_of_change = g_trig_prob_menu->selected();
-  g_params.trigger_length_percent     = g_trig_length_menu->selected();
-  g_params.number_of_steps            = g_steps_menu->selected();
-  g_octaves                           = g_octaves_menu->selected();
-  g_starting_note                     = g_start_note_menu->selected();
-  g_params.is_cv_erase                = g_cv_erase_menu->value();
-  g_params.is_trig_erase              = g_trig_erase_menu->value();
-  g_params.cv_source                  = static_cast<rls::CvSource>(
-      g_cv_source_menu->selected_index());
-
+  g_sequencer.voice(0).SetParams(g_vparams);
   RebuildScale_locked();
 }
 
@@ -147,47 +137,44 @@ static void OnMenuCommit(void* /*user*/) {
 //  Menu setup
 // ============================================================
 static void BuildMenu() {
-  g_scale_idx = rls::FindScaleIndex("major");
+  g_scale_idx = seq::FindScaleIndex("major");
   if (g_scale_idx < 0) g_scale_idx = 0;
 
-  g_scale_names.clear();
-  g_scale_names.reserve(rls::kNumScales);
-  for (int i = 0; i < rls::kNumScales; ++i)
-    g_scale_names.push_back(rls::kScales[i].name);
+  g_scale_names.reserve(seq::kNumScales);
+  for (int i = 0; i < seq::kNumScales; ++i)
+    g_scale_names.push_back(seq::kScales[i].name);
 
-  g_scale_menu       = new rls::SingleSelectVerticalScrollMenu(
-      "Scale", g_scale_names.data(), rls::kNumScales, g_scale_idx);
-  g_cv_prob_menu     = new rls::NumericalValueRangeMenu("CVProb",    0,  0, 100, 5);
-  g_trig_prob_menu   = new rls::NumericalValueRangeMenu("TrigProb",  0,  0, 100, 5);
-  g_trig_length_menu = new rls::NumericalValueRangeMenu("TrgLngth%",50,  0, 100, 10);
-  g_steps_menu       = new rls::NumericalValueRangeMenu("Steps",    16,
-                                                        rls::kMinSteps,
-                                                        rls::kMaxSteps, 1);
-  g_octaves_menu     = new rls::NumericalValueRangeMenu("Octaves",   1,
-                                                        rls::kMinOctaves,
-                                                        rls::kMaxOctaves, 1);
-  g_start_note_menu  = new rls::NumericalValueRangeMenu("Start note",0,  0, 36, 1);
-  g_cv_erase_menu    = new rls::ToggleMenu("CvErase",     false);
-  g_trig_erase_menu  = new rls::ToggleMenu("TrigErase",   false);
-  // CV source: Normal / Test / Tuning (replaces the two old ToggleMenus).
-  g_cv_source_menu   = new rls::SingleSelectVerticalScrollMenu(
+  g_scale_item        = new seq::SingleSelectItem(
+      "Scale", g_scale_names.data(), seq::kNumScales, g_scale_idx);
+  g_cv_prob_item      = new seq::NumericalItem("CVProb",    0,  0, 100, 5);
+  g_trig_prob_item    = new seq::NumericalItem("TrigProb",  0,  0, 100, 5);
+  g_trig_length_item  = new seq::NumericalItem("TrgLngth%",50,  0, 100, 10);
+  g_steps_item        = new seq::NumericalItem("Steps",    16,
+                                               seq::kMinSteps,
+                                               seq::kMaxSteps, 1);
+  g_octaves_item      = new seq::NumericalItem("Octaves",   1,
+                                               seq::kMinOctaves,
+                                               seq::kMaxOctaves, 1);
+  g_start_note_item   = new seq::NumericalItem("Start note",0,  0, 36, 1);
+  g_cv_erase_item     = new seq::ToggleItem("CvErase",   false);
+  g_trig_erase_item   = new seq::ToggleItem("TrigErase", false);
+  g_cv_source_item    = new seq::SingleSelectItem(
       "CV Source", kCvSourceNames, kCvSourceCount, 0);
 
-  g_submenus = {
-    g_scale_menu, g_cv_prob_menu, g_trig_prob_menu, g_trig_length_menu,
-    g_steps_menu, g_octaves_menu, g_start_note_menu,
-    g_cv_erase_menu, g_trig_erase_menu, g_cv_source_menu,
+  g_items = {
+    g_scale_item, g_cv_prob_item, g_trig_prob_item, g_trig_length_item,
+    g_steps_item, g_octaves_item, g_start_note_item,
+    g_cv_erase_item, g_trig_erase_item, g_cv_source_item,
   };
 
-  g_menu.SetSubmenus(g_submenus.data(),
-                     static_cast<int>(g_submenus.size()));
-  g_menu.SetCommitCallback(&OnMenuCommit, nullptr);
+  g_root_view.SetTitle("Main Menu");
+  g_root_view.SetItems(g_items.data(), static_cast<int>(g_items.size()));
+  g_root_view.SetCommitCallback(&OnMenuCommit, nullptr);
 
-  // Initial sync: scale/params from menu defaults.
+  g_views.Push(&g_root_view);
+
   OnMenuCommit(nullptr);
-  // Engine init after we have a scale.
-  g_engine.SetParams(g_params);
-  g_engine.Init();
+  g_sequencer.Init();
 }
 
 // ============================================================
@@ -201,32 +188,28 @@ static void ClockThreadMain() {
   while (!g_app_quitting.load()) {
     if (g_reset_request.exchange(false)) {
       std::lock_guard<std::mutex> lk(g_mutex);
-      g_engine.Init();
+      g_sequencer.Reset();
     }
     if (g_manual_pulse_request.exchange(false)) {
-      // Simulate a real clock pulse: rising at t0, falling at t0+100ms,
-      // so the engine measures a sensible gate width. Without this the
-      // engine sees a 1ms gate and the trigger output is invisible
-      // unless you've been on the internal clock first.
-      const auto now_ms_t0 = static_cast<uint32_t>(
+      const auto t0 = static_cast<uint32_t>(
           std::chrono::duration_cast<std::chrono::milliseconds>(
               clock_t::now().time_since_epoch()).count());
       constexpr uint32_t kManualGateMs = 100;
       {
         std::lock_guard<std::mutex> lk(g_mutex);
-        g_engine.SetParams(g_params);
-        g_engine.OnClockEdge(true,  now_ms_t0);
+        g_sequencer.OnClockEdge(true, t0);
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(kManualGateMs));
-      const auto now_ms_t1 = now_ms_t0 + kManualGateMs;
+      const auto t1 = t0 + kManualGateMs;
       {
         std::lock_guard<std::mutex> lk(g_mutex);
-        g_engine.OnClockEdge(false, now_ms_t1);
-        g_disp_step.store(g_engine.current_step());
-        g_disp_dac.store(g_engine.last_dac());
-        g_disp_trig.store(g_engine.trig_active());
-        std::memcpy(g_disp_cv,        g_engine.cv_sequence(),      sizeof(g_disp_cv));
-        std::memcpy(g_disp_trig_grid, g_engine.trigger_sequence(), sizeof(g_disp_trig_grid));
+        g_sequencer.OnClockEdge(false, t1);
+        const seq::Voice& v = g_sequencer.voice(0);
+        g_disp_step.store(v.last_played_step());
+        g_disp_dac.store(v.last_dac());
+        g_disp_trig.store(v.trig_active());
+        std::memcpy(g_disp_cv,        v.cv_sequence(),      sizeof(g_disp_cv));
+        std::memcpy(g_disp_trig_grid, v.trigger_sequence(), sizeof(g_disp_trig_grid));
       }
     }
 
@@ -236,8 +219,8 @@ static void ClockThreadMain() {
               clock_t::now().time_since_epoch()).count());
       {
         std::lock_guard<std::mutex> lk(g_mutex);
-        g_engine.Tick(now_ms);
-        g_disp_trig.store(g_engine.trig_active());
+        g_sequencer.Tick(now_ms);
+        g_disp_trig.store(g_sequencer.voice(0).trig_active());
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
       next = clock_t::now();
@@ -257,33 +240,32 @@ static void ClockThreadMain() {
             clock_t::now().time_since_epoch()).count());
     {
       std::lock_guard<std::mutex> lk(g_mutex);
-      g_engine.SetParams(g_params);
-      g_engine.OnClockEdge(clock_high, now_ms);
-      g_engine.Tick(now_ms);
+      g_sequencer.OnClockEdge(clock_high, now_ms);
+      g_sequencer.Tick(now_ms);
 
-      g_disp_step.store(g_engine.current_step());
-      g_disp_dac.store(g_engine.last_dac());
-      g_disp_trig.store(g_engine.trig_active());
-      std::memcpy(g_disp_cv,        g_engine.cv_sequence(),      sizeof(g_disp_cv));
-      std::memcpy(g_disp_trig_grid, g_engine.trigger_sequence(), sizeof(g_disp_trig_grid));
+      const seq::Voice& v = g_sequencer.voice(0);
+      g_disp_step.store(v.last_played_step());
+      g_disp_dac.store(v.last_dac());
+      g_disp_trig.store(v.trig_active());
+      std::memcpy(g_disp_cv,        v.cv_sequence(),      sizeof(g_disp_cv));
+      std::memcpy(g_disp_trig_grid, v.trigger_sequence(), sizeof(g_disp_trig_grid));
     }
   }
 }
 
 // ============================================================
-//  OLED widget — renders the menu output
+//  OLED widget
 // ============================================================
 static void RenderOledWidget() {
   {
     std::lock_guard<std::mutex> lk(g_mutex);
-    g_menu.Draw(g_oled);
+    g_views.Draw(g_oled);
   }
-
   ImGui::Begin("OLED 128x64");
   ImDrawList* dl = ImGui::GetWindowDrawList();
   ImVec2 p0 = ImGui::GetCursorScreenPos();
   const float scale = 3.0f;
-  ImVec2 p1 = ImVec2(p0.x + 128 * scale, p0.y + 64 * scale);
+  ImVec2 p1(p0.x + 128 * scale, p0.y + 64 * scale);
   dl->AddRectFilled(p0, p1, IM_COL32(8, 12, 20, 255));
   for (int y = 0; y < 64; ++y) {
     for (int x = 0; x < 128; ++x) {
@@ -299,8 +281,7 @@ static void RenderOledWidget() {
 }
 
 // ============================================================
-//  Sequencer Controls — direct ImGui sliders, bidirectionally
-//  synced with the on-OLED menu state.
+//  Sequencer Controls window
 // ============================================================
 static void RenderControlsWindow() {
   ImGui::Begin("Sequencer Controls");
@@ -312,38 +293,36 @@ static void RenderControlsWindow() {
   if (ImGui::SliderInt("BPM", &bpm, 20, 240)) g_bpm.store(bpm);
 
   ImGui::SeparatorText("Direct param edit (syncs to menu)");
-  // Snapshot menu state under lock, modify, write back.
   bool changed = false;
   int  cv_prob, trig_prob, trig_len, steps, octs, start_note;
   bool cv_erase, trig_erase;
-  int  cv_source_idx;
-  int  scale_idx;
+  int  cv_source_idx, scale_idx;
   {
     std::lock_guard<std::mutex> lk(g_mutex);
-    cv_prob       = g_cv_prob_menu->selected();
-    trig_prob     = g_trig_prob_menu->selected();
-    trig_len      = g_trig_length_menu->selected();
-    steps         = g_steps_menu->selected();
-    octs          = g_octaves_menu->selected();
-    start_note    = g_start_note_menu->selected();
-    cv_erase      = g_cv_erase_menu->value();
-    trig_erase    = g_trig_erase_menu->value();
-    cv_source_idx = g_cv_source_menu->selected_index();
-    scale_idx     = g_scale_menu->selected_index();
+    cv_prob       = g_cv_prob_item->value();
+    trig_prob     = g_trig_prob_item->value();
+    trig_len      = g_trig_length_item->value();
+    steps         = g_steps_item->value();
+    octs          = g_octaves_item->value();
+    start_note    = g_start_note_item->value();
+    cv_erase      = g_cv_erase_item->value();
+    trig_erase    = g_trig_erase_item->value();
+    cv_source_idx = g_cv_source_item->selected_index();
+    scale_idx     = g_scale_item->selected_index();
   }
 
-  if (ImGui::BeginCombo("Scale", rls::kScales[scale_idx].name)) {
-    for (int i = 0; i < rls::kNumScales; ++i) {
+  if (ImGui::BeginCombo("Scale", seq::kScales[scale_idx].name)) {
+    for (int i = 0; i < seq::kNumScales; ++i) {
       bool sel = (i == scale_idx);
-      if (ImGui::Selectable(rls::kScales[i].name, sel)) {
+      if (ImGui::Selectable(seq::kScales[i].name, sel)) {
         scale_idx = i;
         changed = true;
       }
     }
     ImGui::EndCombo();
   }
-  changed |= ImGui::SliderInt("Steps",         &steps,      rls::kMinSteps,   rls::kMaxSteps);
-  changed |= ImGui::SliderInt("Octaves",       &octs,       rls::kMinOctaves, rls::kMaxOctaves);
+  changed |= ImGui::SliderInt("Steps",         &steps,      seq::kMinSteps,   seq::kMaxSteps);
+  changed |= ImGui::SliderInt("Octaves",       &octs,       seq::kMinOctaves, seq::kMaxOctaves);
   changed |= ImGui::SliderInt("Start note",    &start_note, 0, 36);
   changed |= ImGui::SliderInt("CV change %",   &cv_prob,    0, 100);
   changed |= ImGui::SliderInt("Trig change %", &trig_prob,  0, 100);
@@ -363,17 +342,17 @@ static void RenderControlsWindow() {
 
   if (changed) {
     std::lock_guard<std::mutex> lk(g_mutex);
-    g_scale_menu->set_selected_index(scale_idx);
-    g_cv_prob_menu->set_selected(cv_prob);
-    g_trig_prob_menu->set_selected(trig_prob);
-    g_trig_length_menu->set_selected(trig_len);
-    g_steps_menu->set_selected(steps);
-    g_octaves_menu->set_selected(octs);
-    g_start_note_menu->set_selected(start_note);
-    g_cv_erase_menu->set_value(cv_erase);
-    g_trig_erase_menu->set_value(trig_erase);
-    g_cv_source_menu->set_selected_index(cv_source_idx);
-    OnMenuCommit(nullptr);  // sync into engine + scale buffer
+    g_scale_item->set_selected_index(scale_idx);
+    g_cv_prob_item->set_value(cv_prob);
+    g_trig_prob_item->set_value(trig_prob);
+    g_trig_length_item->set_value(trig_len);
+    g_steps_item->set_value(steps);
+    g_octaves_item->set_value(octs);
+    g_start_note_item->set_value(start_note);
+    g_cv_erase_item->set_value(cv_erase);
+    g_trig_erase_item->set_value(trig_erase);
+    g_cv_source_item->set_selected_index(cv_source_idx);
+    OnMenuCommit(nullptr);
   }
 
   ImGui::SeparatorText("Engine inspector");
@@ -382,14 +361,14 @@ static void RenderControlsWindow() {
               static_cast<unsigned>(g_disp_dac.load()),
               g_disp_trig.load() ? "ON" : "off");
   ImGui::Text("Scale notes: %d", g_scale_count);
+  ImGui::Text("Views in stack: %d", g_views.depth());
 
-  // Mini step grid (engine-state visualization, not on-OLED)
   ImDrawList* dl = ImGui::GetWindowDrawList();
   ImVec2 grid_p0 = ImGui::GetCursorScreenPos();
   const float cell  = 18.0f;
   const float gap   = 3.0f;
   const int   step  = g_disp_step.load();
-  for (int i = 0; i < rls::kMaxSteps; ++i) {
+  for (int i = 0; i < seq::kMaxSteps; ++i) {
     const int   col = i % 8;
     const int   row = i / 8;
     const ImVec2 a(grid_p0.x + col * (cell + gap),
@@ -397,7 +376,7 @@ static void RenderControlsWindow() {
     const ImVec2 b(a.x + cell, a.y + cell);
     const bool active_seq = (i < steps);
     const bool has_trig   = g_disp_trig_grid[i] != 0;
-    const bool is_cur     = (i + 1 == step) || (step == 0 && i == steps - 1);
+    const bool is_cur     = (i == step);
     if (!active_seq) {
       dl->AddRect(a, b, IM_COL32(60, 60, 60, 255));
     } else if (is_cur) {
@@ -409,6 +388,7 @@ static void RenderControlsWindow() {
     }
   }
   ImGui::Dummy(ImVec2(8 * (cell + gap), 2 * (cell + gap) + 6));
+
   ImGui::End();
 }
 
@@ -420,18 +400,24 @@ static void OnKey(GLFWwindow* win, int key, int /*sc*/, int action, int /*mods*/
   switch (key) {
     case GLFW_KEY_LEFT: {
       std::lock_guard<std::mutex> lk(g_mutex);
-      g_menu.OnRotate(-1);
+      g_views.OnRotate(-1);
       break;
     }
     case GLFW_KEY_RIGHT: {
       std::lock_guard<std::mutex> lk(g_mutex);
-      g_menu.OnRotate(+1);
+      g_views.OnRotate(+1);
       break;
     }
     case GLFW_KEY_SPACE:
       if (action == GLFW_PRESS) {
         std::lock_guard<std::mutex> lk(g_mutex);
-        g_menu.OnPress();
+        g_views.OnPress();
+      }
+      break;
+    case GLFW_KEY_BACKSPACE:
+      if (action == GLFW_PRESS) {
+        std::lock_guard<std::mutex> lk(g_mutex);
+        g_views.OnLongPress();
       }
       break;
     case GLFW_KEY_G:
@@ -464,8 +450,7 @@ int main() {
   glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
 
   GLFWwindow* win = glfwCreateWindow(
-      1100, 720, "Random Looping Sequencer — Playground",
-      nullptr, nullptr);
+      1100, 720, "Generative Sequencer — Playground", nullptr, nullptr);
   if (!win) { glfwTerminate(); return 1; }
   glfwMakeContextCurrent(win);
   glfwSwapInterval(1);
@@ -483,7 +468,6 @@ int main() {
 
   while (!glfwWindowShouldClose(win)) {
     glfwPollEvents();
-
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
@@ -508,10 +492,9 @@ int main() {
   glfwDestroyWindow(win);
   glfwTerminate();
 
-  delete g_scale_menu;       delete g_cv_prob_menu;
-  delete g_trig_prob_menu;   delete g_trig_length_menu;
-  delete g_steps_menu;       delete g_octaves_menu;
-  delete g_start_note_menu;  delete g_cv_erase_menu;
-  delete g_trig_erase_menu;  delete g_cv_source_menu;
+  delete g_scale_item;   delete g_cv_prob_item;   delete g_trig_prob_item;
+  delete g_trig_length_item; delete g_steps_item; delete g_octaves_item;
+  delete g_start_note_item;  delete g_cv_erase_item;
+  delete g_trig_erase_item;  delete g_cv_source_item;
   return 0;
 }

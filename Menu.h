@@ -1,214 +1,219 @@
 // Menu.h
-// C++ port of Software/lib/menu.py — the on-OLED menu system driven by
-// the rotary encoder + push-button.
+// View-stack-based menu system for the OLED + encoder UI.
 //
-// Rendering target is an rls::FakeOled instance (the macOS playground)
-// or, on hardware, an SSD1306_I2C driver wrapped to expose the same
-// primitives (fill/text/rect/fill_rect). The class hierarchy mirrors
-// the Python source so behaviour stays one-to-one with the firmware:
+// Replaces the v0.2 design (MainMenu owning a flat list of Submenu*
+// with a 3-boolean state machine) with:
 //
-//   MainMenu                  — list of submenus, scroll + button dispatch
-//   Submenu                   — base class
-//     SingleSelectVerticalScrollMenu  — choose one of N strings
-//     NumericalValueRangeMenu         — int in [min, max] step incr
-//     ToggleMenu                      — bool toggle (no separate edit screen)
+//   View       — anything that draws to the OLED and consumes encoder
+//                events. Long-press cancels by popping itself off the
+//                view stack without committing.
+//   ViewStack  — the navigation history. Push to enter, pop to leave.
+//                Hierarchical navigation comes for free once we go
+//                polyphonic (a top-level "Voice 1 → Voice 2 → …" view
+//                sits above the per-voice list).
+//   MenuItem   — a row in a MenuListView. Pressing the row either
+//                pushes an editor view (numeric, single-select), or
+//                fires inline (toggle). Different from a View because
+//                an item only ever exists *inside* a list — it doesn't
+//                draw a full screen on its own.
 //
-// Encoder interaction model: host calls OnRotate(delta) per detent and
-// OnPress() on rotary-button press. The menu owns a `rotary_value`
-// bounded to whatever range the current view needs.
+// This is the Phase-A architecture. Behaviour parity with v0.2 is the
+// goal of the first commit; feature work (long-press cancel, toggle
+// flash, scale-name truncation, etc.) lands on this skeleton in Phase B.
 
 #pragma once
 #include <cstdint>
 #include "FakeOled.h"
 
-namespace rls {
+namespace seq {
 
-class MainMenu;
+class ViewStack;
+class View;
+class MenuItem;
+class MenuListView;
 
 // ============================================================
-//  Submenu base + concrete kinds
+//  View
 // ============================================================
-class Submenu {
+class View {
  public:
-  enum class Kind { kSingleSelect, kNumeric, kToggle };
-
-  Submenu(const char* name, Kind kind) : name_(name), kind_(kind) {}
-  virtual ~Submenu() = default;
-
-  const char* name() const { return name_; }
-  Kind        kind() const { return kind_; }
-
-  // The one-line "Name:value" representation drawn in the main menu list.
-  // Matches Python __repr__ for each subclass.
-  virtual void Repr(char* out, int out_cap) const = 0;
-
-  // Called by MainMenu when this submenu is entered (rotary range set, etc.)
-  virtual void Start(MainMenu& parent) = 0;
-
-  // Called by MainMenu while this submenu is active. Re-renders if needed.
-  virtual void OnRotate(MainMenu& parent, int delta) = 0;
-
-  // Called by MainMenu when the user confirms (button press inside submenu).
-  // Returns true if the value actually changed.
-  virtual bool Commit(MainMenu& parent) = 0;
-
-  // For ToggleMenu the button press in MainMenu acts directly without a
-  // separate edit screen. Returns true for ToggleMenu.
-  virtual bool IsToggleStyle() const { return false; }
-
-  // Draw the editor for this submenu (only called when active).
+  virtual ~View() = default;
   virtual void Draw(FakeOled& oled) const = 0;
-
+  // Encoder events. Defaults are no-ops so subclasses only override what
+  // they care about.
+  virtual void OnRotate(int /*delta*/) {}
+  virtual void OnPress()               {}
+  virtual void OnLongPress();   // default: pop self if poppable
+  void set_stack(ViewStack* s) { stack_ = s; }
+  ViewStack* stack() const     { return stack_; }
  protected:
-  const char* name_;
-  Kind        kind_;
+  ViewStack* stack_ = nullptr;
 };
 
-class SingleSelectVerticalScrollMenu : public Submenu {
+// ============================================================
+//  ViewStack
+// ============================================================
+class ViewStack {
  public:
-  SingleSelectVerticalScrollMenu(const char* name,
-                                 const char* const* items,
-                                 int items_count,
-                                 int selected_index);
+  static constexpr int kMaxDepth = 8;
 
-  int  selected_index() const { return selected_index_; }
-  void set_selected_index(int idx) { selected_index_ = idx; }
-  const char* selected_item() const { return items_[selected_index_]; }
+  void Push(View* v);
+  void Pop();
+  View* top() const { return depth_ > 0 ? stack_[depth_ - 1] : nullptr; }
+  int   depth() const { return depth_; }
+  bool  can_pop() const { return depth_ > 1; }
 
-  void Repr(char* out, int out_cap) const override;
-  void Start(MainMenu& parent) override;
-  void OnRotate(MainMenu& parent, int delta) override;
-  bool Commit(MainMenu& parent) override;
-  void Draw(FakeOled& oled) const override;
+  void Draw(FakeOled& oled) const { if (View* v = top()) v->Draw(oled); }
+  void OnRotate(int delta)        { if (View* v = top()) v->OnRotate(delta); }
+  void OnPress()                  { if (View* v = top()) v->OnPress(); }
+  void OnLongPress()              { if (View* v = top()) v->OnLongPress(); }
 
  private:
-  void Scroll(int idx);
-
-  const char* const* items_;
-  int  items_count_;
-  int  selected_index_;
-  int  highlighted_index_  = 0;
-  int  menu_start_index_   = 0;
-  int  total_lines_        = 4;
+  View* stack_[kMaxDepth] = {nullptr};
+  int   depth_            = 0;
 };
 
-class NumericalValueRangeMenu : public Submenu {
+// ============================================================
+//  MenuItem — a row in a MenuListView
+// ============================================================
+class MenuItem {
  public:
-  NumericalValueRangeMenu(const char* name,
-                          int selected, int min_val, int max_val, int increment);
+  virtual ~MenuItem() = default;
+  virtual const char* name() const = 0;
+  // Writes a line like "CVProb:30" or "Scale:major" into out.
+  virtual void Repr(char* out, int cap) const = 0;
+  // Pressed while highlighted. Returns a View* to push (the editor),
+  // or nullptr to stay in the list. Toggle items mutate inline.
+  // `list` is the parent MenuListView (so editors can notify on commit).
+  virtual View* OnPressInList(ViewStack& stack, MenuListView& list) = 0;
+};
 
-  int  selected() const { return selected_; }
-  void set_selected(int v) { selected_ = v; }
-  int  min_val()  const { return min_val_; }
-  int  max_val()  const { return max_val_; }
-  int  increment() const { return increment_; }
+// ============================================================
+//  MenuListView — the root navigation list (and any nested list)
+// ============================================================
+class MenuListView : public View {
+ public:
+  void SetTitle(const char* t) { title_ = t; }
+  void SetItems(MenuItem* const* items, int count);
 
-  void Repr(char* out, int out_cap) const override;
-  void Start(MainMenu& parent) override;
-  void OnRotate(MainMenu& parent, int delta) override;
-  bool Commit(MainMenu& parent) override;
+  typedef void (*CommitCallback)(void* user);
+  void SetCommitCallback(CommitCallback cb, void* user) {
+    commit_cb_ = cb;
+    commit_user_ = user;
+  }
+  void NotifyCommit() { if (commit_cb_) commit_cb_(commit_user_); }
+
   void Draw(FakeOled& oled) const override;
+  void OnRotate(int delta) override;
+  void OnPress() override;
+
+  int highlighted_index() const { return highlighted_; }
+  int item_count()         const { return count_; }
+  MenuItem* item(int i)    const { return items_ ? items_[i] : nullptr; }
 
  private:
-  int selected_;
-  int new_value_;
-  int min_val_;
-  int max_val_;
-  int increment_;
+  const char*       title_           = "Menu";
+  MenuItem* const*  items_           = nullptr;
+  int               count_           = 0;
+  int               highlighted_     = 0;
+  int               menu_start_idx_  = 0;
+  int               total_lines_     = 4;
+  CommitCallback    commit_cb_       = nullptr;
+  void*             commit_user_     = nullptr;
 };
 
-class ToggleMenu : public Submenu {
+// ============================================================
+//  Concrete MenuItems
+// ============================================================
+class ToggleItem : public MenuItem {
  public:
-  ToggleMenu(const char* name, bool value);
-
+  ToggleItem(const char* name, bool initial) : name_(name), value_(initial) {}
+  const char* name() const override { return name_; }
+  void Repr(char* out, int cap) const override;
+  View* OnPressInList(ViewStack& stack, MenuListView& list) override;
   bool value() const { return value_; }
   void set_value(bool v) { value_ = v; }
-
-  bool IsToggleStyle() const override { return true; }
-  void Repr(char* out, int out_cap) const override;
-  void Start(MainMenu& parent) override;     // no-op; ToggleMenu has no edit screen
-  void OnRotate(MainMenu& parent, int delta) override;  // no-op
-  bool Commit(MainMenu& parent) override;
-  void Draw(FakeOled& oled) const override;  // no-op
-
-  // Called by MainMenu directly when its button is pressed and the
-  // highlighted submenu is a ToggleMenu — flips the bool, no edit screen.
-  bool Toggle() { value_ = !value_; return true; }
-
  private:
-  bool value_;
+  const char* name_;
+  bool        value_;
 };
 
-// ============================================================
-//  MainMenu — owns the list of submenus and the state machine
-// ============================================================
-class MainMenu {
+class NumericalItem : public MenuItem {
  public:
-  // The host passes a non-owning array of Submenu*. Lifetime managed by host.
-  void SetSubmenus(Submenu* const* submenus, int count);
+  NumericalItem(const char* name, int initial,
+                int min_v, int max_v, int step)
+      : name_(name), value_(initial),
+        min_(min_v), max_(max_v), step_(step) {}
+  const char* name() const override { return name_; }
+  void Repr(char* out, int cap) const override;
+  View* OnPressInList(ViewStack& stack, MenuListView& list) override;
 
-  // Encoder events.
-  void OnRotate(int delta);
-  void OnPress();      // rotary button down → debounced press
-
-  // Whether we're currently inside a submenu edit (so renderer knows what to draw).
-  bool in_main()        const { return current_menu_index_ < 0 && !submenu_editing_; }
-  bool in_submenu()     const { return submenu_editing_; }
-  Submenu* current_submenu() const { return current_submenu_; }
-
-  // Render the current view (main list OR active submenu's editor) into oled.
-  void Draw(FakeOled& oled) const;
-
-  // ---- Hooks the host registers ----
-  // Called once whenever a submenu confirms (the menu returns to main).
-  // Lets the host pull all submenu state into engine params at one moment.
-  typedef void (*CommitCallback)(void* user);
-  void SetCommitCallback(CommitCallback cb, void* user) { commit_cb_ = cb; commit_user_ = user; }
-
-  // ---- Internal state used by Submenu subclasses ----
-  // Submenus call these to drive the bounded rotary count when active.
-  int  rotary_value() const { return rotary_value_; }
-  void set_rotary_bounds(int value, int min_v, int max_v, int incr) {
-    rotary_value_ = value;
-    rotary_min_   = min_v;
-    rotary_max_   = max_v;
-    rotary_incr_  = incr;
-  }
-
-  int  total_lines()        const { return total_lines_; }
-  int  highlighted_index()  const { return highlighted_index_; }
-  int  menu_start_index()   const { return menu_start_index_; }
+  int  value() const { return value_; }
+  void set_value(int v) { value_ = v; }
+  int  min_val() const { return min_; }
+  int  max_val() const { return max_; }
+  int  step()    const { return step_; }
 
  private:
-  void DrawMainList(FakeOled& oled) const;
-  void ScrollMainMenu(int index);
-  void ApplyRotaryDelta(int delta);
-
-  Submenu* const* submenus_         = nullptr;
-  int             submenus_count_   = 0;
-
-  // Main-list scroll state
-  int             highlighted_index_ = 0;
-  int             menu_start_index_  = 0;
-  int             total_lines_       = 4;
-
-  // State machine — mirrors menu.py
-  bool            submenu_editing_  = false;
-  int             current_menu_index_ = -1;
-  Submenu*        current_submenu_   = nullptr;
-
-  // Bounded rotary count (matches the Python `rotary` global state)
-  int             rotary_value_ = 0;
-  int             rotary_min_   = 0;
-  int             rotary_max_   = 0;
-  int             rotary_incr_  = 1;
-
-  CommitCallback  commit_cb_   = nullptr;
-  void*           commit_user_ = nullptr;
+  const char* name_;
+  int value_, min_, max_, step_;
 };
 
-// 9-vowel "compact" rendering used by SingleSelectVerticalScrollMenu when
-// the selected item name is ≥9 chars. Mirrors Python remove_vowels().
-void CompactName(const char* in, char* out, int out_cap);
+class SingleSelectItem : public MenuItem {
+ public:
+  SingleSelectItem(const char* name,
+                   const char* const* options, int option_count,
+                   int initial_index)
+      : name_(name), options_(options), option_count_(option_count),
+        selected_(initial_index) {}
+  const char* name() const override { return name_; }
+  void Repr(char* out, int cap) const override;
+  View* OnPressInList(ViewStack& stack, MenuListView& list) override;
 
-}  // namespace rls
+  int  selected_index() const { return selected_; }
+  void set_selected_index(int i) { selected_ = i; }
+  const char* selected_label() const { return options_[selected_]; }
+  const char* const* options() const { return options_; }
+  int  option_count() const { return option_count_; }
+
+ private:
+  const char*        name_;
+  const char* const* options_;
+  int                option_count_;
+  int                selected_;
+};
+
+// ============================================================
+//  Editor views — pushed by NumericalItem / SingleSelectItem
+// ============================================================
+class NumericalEditView : public View {
+ public:
+  NumericalEditView(NumericalItem* item, MenuListView* parent)
+      : item_(item), parent_(parent), draft_(item->value()) {}
+  void Draw(FakeOled& oled) const override;
+  void OnRotate(int delta) override;
+  void OnPress() override;       // commit draft, pop
+  // OnLongPress inherits default (pop without committing) — audit 3b.
+ private:
+  NumericalItem* item_;
+  MenuListView*  parent_;
+  int            draft_;
+};
+
+class SingleSelectEditView : public View {
+ public:
+  SingleSelectEditView(SingleSelectItem* item, MenuListView* parent)
+      : item_(item), parent_(parent),
+        draft_index_(item->selected_index()),
+        scroll_start_(0) {}
+  void Draw(FakeOled& oled) const override;
+  void OnRotate(int delta) override;
+  void OnPress() override;
+ private:
+  SingleSelectItem* item_;
+  MenuListView*     parent_;
+  int               draft_index_;
+  int               scroll_start_;
+};
+
+}  // namespace seq

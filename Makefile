@@ -1,4 +1,4 @@
-# Makefile for the Random Looping Sequencer playground (macOS, Homebrew toolchain).
+# Makefile for the Generative Sequencer playground (macOS, Homebrew toolchain).
 #
 # Prereqs (one-time):
 #   brew install glfw pkg-config
@@ -20,9 +20,9 @@ IMGUI_SRCS = imgui/imgui.cpp imgui/imgui_draw.cpp imgui/imgui_tables.cpp \
              imgui/backends/imgui_impl_glfw.cpp \
              imgui/backends/imgui_impl_opengl3.cpp
 
-ENGINE_SRCS = SequencerEngine.cpp Menu.cpp
+ENGINE_SRCS = Voice.cpp Sequencer.cpp Menu.cpp
 
-ENGINE_HDRS = SequencerEngine.h Scales.h FakeOled.h Menu.h
+ENGINE_HDRS = Voice.h Sequencer.h Scales.h FakeOled.h Menu.h
 
 all: playground
 

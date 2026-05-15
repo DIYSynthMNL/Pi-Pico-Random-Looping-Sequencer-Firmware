@@ -13,7 +13,7 @@
 #include <cstring>
 #include <cmath>
 
-namespace rls {
+namespace seq {
 
 struct FakeOled {
   static constexpr int kW = 128;
@@ -144,4 +144,4 @@ struct FakeOled {
   }
 };
 
-}  // namespace rls
+}  // namespace seq

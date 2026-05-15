@@ -11,7 +11,7 @@
 #include <cstdint>
 #include <cstddef>
 
-namespace rls {
+namespace seq {
 
 constexpr int kMcp4725Multiplier = 68;
 constexpr int kMaxScaleNotes     = 64;        // way more than any 5-oct scale needs
@@ -156,4 +156,4 @@ inline int FindScaleIndex(const char* name) {
   return -1;
 }
 
-}  // namespace rls
+}  // namespace seq
