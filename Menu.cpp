@@ -133,20 +133,47 @@ bool NumericalValueRangeMenu::Commit(MainMenu& parent) {
 }
 
 void NumericalValueRangeMenu::Draw(FakeOled& oled) const {
+  // Horizontal-bar editor — replaces the OLD/NEW two-line text from main.py.
+  // Layout (128x64 OLED):
+  //   y=0..14   : title bar (name)
+  //   y=18      : big current value, centred
+  //   y=36..43  : horizontal bar (fill = position of new_value_ in min..max)
+  //   y=48      : min / max labels
+  //   y=56      : "OLD n" small text on the left
   oled.Clear();
   oled.Text(2, 4, name_);
   oled.Rect(0, 0, 128, 15);
 
-  char old_line[24], new_line[24];
-  std::snprintf(old_line, sizeof(old_line), "OLD: %d", selected_);
-  if (new_value_ == selected_) {
-    std::snprintf(new_line, sizeof(new_line), "NEW: *%d", new_value_);
-  } else {
-    std::snprintf(new_line, sizeof(new_line), "NEW: %d", new_value_);
+  // Big value, centred (each glyph = 6 px wide in our FakeOled font)
+  char val_str[12];
+  std::snprintf(val_str, sizeof(val_str), "%d", new_value_);
+  const int val_w = static_cast<int>(std::strlen(val_str)) * 6;
+  const int val_x = (128 - val_w) / 2;
+  oled.Text(val_x, 18, val_str);
+
+  // Bar (4 px margin each side, 8 px tall)
+  constexpr int kBarX = 4, kBarY = 36, kBarW = 120, kBarH = 8;
+  oled.Rect(kBarX, kBarY, kBarW, kBarH);
+  const int span = (max_val_ - min_val_);
+  const int fill = (span > 0)
+      ? ((new_value_ - min_val_) * (kBarW - 2)) / span
+      : 0;
+  if (fill > 0) {
+    oled.FillRect(kBarX + 1, kBarY + 1, fill, kBarH - 2);
   }
-  oled.Text(0, 20, old_line, true);
-  oled.FillRect(0, 30, 128, 10, true);
-  oled.Text(0, 31, new_line, false);
+
+  // Min and max labels under the bar
+  char min_lbl[8], max_lbl[8];
+  std::snprintf(min_lbl, sizeof(min_lbl), "%d", min_val_);
+  std::snprintf(max_lbl, sizeof(max_lbl), "%d", max_val_);
+  oled.Text(kBarX, 48, min_lbl);
+  const int max_w = static_cast<int>(std::strlen(max_lbl)) * 6;
+  oled.Text(kBarX + kBarW - max_w, 48, max_lbl);
+
+  // "OLD n" reminder
+  char old_lbl[16];
+  std::snprintf(old_lbl, sizeof(old_lbl), "OLD %d", selected_);
+  oled.Text(0, 56, old_lbl);
 }
 
 // ============================================================

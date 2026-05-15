@@ -88,6 +88,10 @@ rls::FakeOled              g_oled;
 // The submenus need a stable scale-name list — built once from Scales.h.
 std::vector<const char*>   g_scale_names;
 
+// CV-source menu options (in CvSource enum order — index = enum value).
+constexpr const char* kCvSourceNames[] = { "Normal", "Test", "Tuning" };
+constexpr int         kCvSourceCount   = 3;
+
 rls::MainMenu                          g_menu;
 rls::SingleSelectVerticalScrollMenu*   g_scale_menu        = nullptr;
 rls::NumericalValueRangeMenu*          g_cv_prob_menu      = nullptr;
@@ -98,8 +102,7 @@ rls::NumericalValueRangeMenu*          g_octaves_menu      = nullptr;
 rls::NumericalValueRangeMenu*          g_start_note_menu   = nullptr;
 rls::ToggleMenu*                       g_cv_erase_menu     = nullptr;
 rls::ToggleMenu*                       g_trig_erase_menu   = nullptr;
-rls::ToggleMenu*                       g_test_seq_menu     = nullptr;
-rls::ToggleMenu*                       g_tuning_menu       = nullptr;
+rls::SingleSelectVerticalScrollMenu*   g_cv_source_menu    = nullptr;
 std::vector<rls::Submenu*>             g_submenus;
 
 }  // namespace
@@ -134,8 +137,8 @@ static void OnMenuCommit(void* /*user*/) {
   g_starting_note                     = g_start_note_menu->selected();
   g_params.is_cv_erase                = g_cv_erase_menu->value();
   g_params.is_trig_erase              = g_trig_erase_menu->value();
-  g_params.is_test_cv_sequence        = g_test_seq_menu->value();
-  g_params.is_tuning_cv_sequence      = g_tuning_menu->value();
+  g_params.cv_source                  = static_cast<rls::CvSource>(
+      g_cv_source_menu->selected_index());
 
   RebuildScale_locked();
 }
@@ -166,13 +169,14 @@ static void BuildMenu() {
   g_start_note_menu  = new rls::NumericalValueRangeMenu("Start note",0,  0, 36, 1);
   g_cv_erase_menu    = new rls::ToggleMenu("CvErase",     false);
   g_trig_erase_menu  = new rls::ToggleMenu("TrigErase",   false);
-  g_test_seq_menu    = new rls::ToggleMenu("TestScale",   false);
-  g_tuning_menu      = new rls::ToggleMenu("TuningScale", false);
+  // CV source: Normal / Test / Tuning (replaces the two old ToggleMenus).
+  g_cv_source_menu   = new rls::SingleSelectVerticalScrollMenu(
+      "CV Source", kCvSourceNames, kCvSourceCount, 0);
 
   g_submenus = {
     g_scale_menu, g_cv_prob_menu, g_trig_prob_menu, g_trig_length_menu,
     g_steps_menu, g_octaves_menu, g_start_note_menu,
-    g_cv_erase_menu, g_trig_erase_menu, g_test_seq_menu, g_tuning_menu,
+    g_cv_erase_menu, g_trig_erase_menu, g_cv_source_menu,
   };
 
   g_menu.SetSubmenus(g_submenus.data(),
@@ -200,18 +204,30 @@ static void ClockThreadMain() {
       g_engine.Init();
     }
     if (g_manual_pulse_request.exchange(false)) {
-      const auto now_ms = static_cast<uint32_t>(
+      // Simulate a real clock pulse: rising at t0, falling at t0+100ms,
+      // so the engine measures a sensible gate width. Without this the
+      // engine sees a 1ms gate and the trigger output is invisible
+      // unless you've been on the internal clock first.
+      const auto now_ms_t0 = static_cast<uint32_t>(
           std::chrono::duration_cast<std::chrono::milliseconds>(
               clock_t::now().time_since_epoch()).count());
-      std::lock_guard<std::mutex> lk(g_mutex);
-      g_engine.SetParams(g_params);
-      g_engine.OnClockEdge(true,  now_ms);
-      g_engine.OnClockEdge(false, now_ms + 1);
-      g_disp_step.store(g_engine.current_step());
-      g_disp_dac.store(g_engine.last_dac());
-      g_disp_trig.store(g_engine.trig_active());
-      std::memcpy(g_disp_cv,        g_engine.cv_sequence(),      sizeof(g_disp_cv));
-      std::memcpy(g_disp_trig_grid, g_engine.trigger_sequence(), sizeof(g_disp_trig_grid));
+      constexpr uint32_t kManualGateMs = 100;
+      {
+        std::lock_guard<std::mutex> lk(g_mutex);
+        g_engine.SetParams(g_params);
+        g_engine.OnClockEdge(true,  now_ms_t0);
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(kManualGateMs));
+      const auto now_ms_t1 = now_ms_t0 + kManualGateMs;
+      {
+        std::lock_guard<std::mutex> lk(g_mutex);
+        g_engine.OnClockEdge(false, now_ms_t1);
+        g_disp_step.store(g_engine.current_step());
+        g_disp_dac.store(g_engine.last_dac());
+        g_disp_trig.store(g_engine.trig_active());
+        std::memcpy(g_disp_cv,        g_engine.cv_sequence(),      sizeof(g_disp_cv));
+        std::memcpy(g_disp_trig_grid, g_engine.trigger_sequence(), sizeof(g_disp_trig_grid));
+      }
     }
 
     if (!g_clock_running.load()) {
@@ -299,21 +315,21 @@ static void RenderControlsWindow() {
   // Snapshot menu state under lock, modify, write back.
   bool changed = false;
   int  cv_prob, trig_prob, trig_len, steps, octs, start_note;
-  bool cv_erase, trig_erase, test_seq, tuning;
+  bool cv_erase, trig_erase;
+  int  cv_source_idx;
   int  scale_idx;
   {
     std::lock_guard<std::mutex> lk(g_mutex);
-    cv_prob    = g_cv_prob_menu->selected();
-    trig_prob  = g_trig_prob_menu->selected();
-    trig_len   = g_trig_length_menu->selected();
-    steps      = g_steps_menu->selected();
-    octs       = g_octaves_menu->selected();
-    start_note = g_start_note_menu->selected();
-    cv_erase   = g_cv_erase_menu->value();
-    trig_erase = g_trig_erase_menu->value();
-    test_seq   = g_test_seq_menu->value();
-    tuning     = g_tuning_menu->value();
-    scale_idx  = g_scale_menu->selected_index();
+    cv_prob       = g_cv_prob_menu->selected();
+    trig_prob     = g_trig_prob_menu->selected();
+    trig_len      = g_trig_length_menu->selected();
+    steps         = g_steps_menu->selected();
+    octs          = g_octaves_menu->selected();
+    start_note    = g_start_note_menu->selected();
+    cv_erase      = g_cv_erase_menu->value();
+    trig_erase    = g_trig_erase_menu->value();
+    cv_source_idx = g_cv_source_menu->selected_index();
+    scale_idx     = g_scale_menu->selected_index();
   }
 
   if (ImGui::BeginCombo("Scale", rls::kScales[scale_idx].name)) {
@@ -334,8 +350,16 @@ static void RenderControlsWindow() {
   changed |= ImGui::SliderInt("Trig length %", &trig_len,   0, 100);
   changed |= ImGui::Checkbox ("CV erase",      &cv_erase);
   changed |= ImGui::Checkbox ("Trig erase",    &trig_erase);
-  changed |= ImGui::Checkbox ("Test sequence", &test_seq);
-  changed |= ImGui::Checkbox ("Tuning seq",    &tuning);
+  if (ImGui::BeginCombo("CV source", kCvSourceNames[cv_source_idx])) {
+    for (int i = 0; i < kCvSourceCount; ++i) {
+      bool sel = (i == cv_source_idx);
+      if (ImGui::Selectable(kCvSourceNames[i], sel)) {
+        cv_source_idx = i;
+        changed = true;
+      }
+    }
+    ImGui::EndCombo();
+  }
 
   if (changed) {
     std::lock_guard<std::mutex> lk(g_mutex);
@@ -348,8 +372,7 @@ static void RenderControlsWindow() {
     g_start_note_menu->set_selected(start_note);
     g_cv_erase_menu->set_value(cv_erase);
     g_trig_erase_menu->set_value(trig_erase);
-    g_test_seq_menu->set_value(test_seq);
-    g_tuning_menu->set_value(tuning);
+    g_cv_source_menu->set_selected_index(cv_source_idx);
     OnMenuCommit(nullptr);  // sync into engine + scale buffer
   }
 
@@ -489,7 +512,6 @@ int main() {
   delete g_trig_prob_menu;   delete g_trig_length_menu;
   delete g_steps_menu;       delete g_octaves_menu;
   delete g_start_note_menu;  delete g_cv_erase_menu;
-  delete g_trig_erase_menu;  delete g_test_seq_menu;
-  delete g_tuning_menu;
+  delete g_trig_erase_menu;  delete g_cv_source_menu;
   return 0;
 }
