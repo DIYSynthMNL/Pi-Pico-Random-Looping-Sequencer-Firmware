@@ -113,7 +113,7 @@ constexpr int          kDigInModeCount    = 4;
 // Menu items + view stack
 std::vector<const char*>  g_scale_names;
 seq::ViewStack            g_views;
-seq::MenuListView         g_root_view;
+seq::MenuListView         g_menu_view;       // pushed on top of playback when user clicks
 
 seq::SingleSelectItem*    g_scale_item        = nullptr;
 seq::NumericalItem*       g_cv_prob_item      = nullptr;
@@ -162,6 +162,103 @@ static void ActionClearCv(void* /*user*/) {
 static void ActionClearTriggers(void* /*user*/) {
   g_sequencer.voice(0).ClearTriggers();
 }
+
+// ============================================================
+//  Note-name helper — DAC → "C3" / "D#4" etc.
+// ============================================================
+// Matches the audition's pitch model: DAC 0 = MIDI 24 = C1, every 68
+// DAC units = 1 semitone. Used by the OLED PlaybackView, the engine
+// inspector's CV-bar labels, and the active-scale-notes panel.
+namespace {
+constexpr const char* kNoteNames[12] = {
+  "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
+};
+}  // namespace
+
+static void DacToNoteName(uint16_t dac, char* out, int cap) {
+  const int midi      = 24 + static_cast<int>(dac) / 68;
+  const int idx       = ((midi % 12) + 12) % 12;
+  const int octave    = (midi / 12) - 1;   // MIDI 24 = C1
+  std::snprintf(out, cap, "%s%d", kNoteNames[idx], octave);
+}
+
+// ============================================================
+//  PlaybackView — OLED home screen showing the engine in motion
+// ============================================================
+// Sits at the bottom of the view stack. Encoder click pushes the menu
+// list on top of it; long-press inside the menu pops back here.
+class PlaybackView : public seq::View {
+ public:
+  void Draw(seq::FakeOled& oled) const override {
+    oled.Clear();
+
+    // Header: PLAY/STOP, scale (truncated), step n/total
+    const int  step  = g_disp_step.load();
+    const int  steps = g_steps_item ? g_steps_item->value() : 16;
+    const bool run   = g_run_item  ? g_run_item->value()    : false;
+    const char* scale = (g_scale_idx >= 0 && g_scale_idx < seq::kNumScales)
+                        ? seq::kScales[g_scale_idx].name : "";
+    char scale_short[8];
+    int sl = 0;
+    for (; scale[sl] && sl < 7; ++sl) scale_short[sl] = scale[sl];
+    scale_short[sl] = 0;
+
+    char header[24];
+    std::snprintf(header, sizeof(header), "%s %s %02d/%02d",
+                  run ? "PLAY" : "STOP",
+                  scale_short, step + 1, steps);
+    oled.Text(2, 2, header);
+    oled.Rect(0, 0, 128, 12);
+
+    // Step grid — 8 cells per row, 2 rows.
+    constexpr int kTopY  = 16;
+    constexpr int kCellW = 14;
+    constexpr int kCellH = 14;
+    constexpr int kGapX  = 2;
+    constexpr int kGapY  = 2;
+    for (int i = 0; i < seq::kMaxSteps; ++i) {
+      const int col = i % 8;
+      const int row = i / 8;
+      const int x   = col * (kCellW + kGapX);
+      const int y   = kTopY + row * (kCellH + kGapY);
+      const bool active = (i < steps);
+      const bool trig   = g_disp_trig_grid[i] != 0;
+      const bool is_cur = (i == step);
+      if (!active) {
+        oled.Px(x + kCellW / 2, y + kCellH / 2, true);   // dim dot
+      } else if (is_cur) {
+        oled.FillRect(x, y, kCellW, kCellH);             // filled = now playing
+      } else if (trig) {
+        oled.Rect(x, y, kCellW, kCellH);                 // outlined = trig on
+      } else {
+        // four corners (a "trig off" tag)
+        oled.Px(x, y, true);
+        oled.Px(x + kCellW - 1, y, true);
+        oled.Px(x, y + kCellH - 1, true);
+        oled.Px(x + kCellW - 1, y + kCellH - 1, true);
+      }
+    }
+
+    // Footer: current note name + DAC value + trig indicator
+    char note[8];
+    DacToNoteName(g_disp_dac.load(), note, sizeof(note));
+    char footer[28];
+    std::snprintf(footer, sizeof(footer), "%-4s %4u %s",
+                  note,
+                  static_cast<unsigned>(g_disp_dac.load()),
+                  g_disp_trig.load() ? "TRIG" : "    ");
+    oled.Text(2, 53, footer);
+  }
+
+  // Click → enter the menu.
+  void OnPress() override {
+    if (stack()) stack()->Push(&g_menu_view);
+  }
+  // Long-press at the root → no-op (default View::OnLongPress doesn't pop
+  // when depth is 1, so this is implicit).
+};
+
+PlaybackView g_playback_view;
 
 // ============================================================
 //  Menu commit callback — sync menu items into engine params
@@ -231,11 +328,14 @@ static void BuildMenu() {
     g_clear_cv_item, g_clear_trig_item,
   };
 
-  g_root_view.SetTitle("Main Menu");
-  g_root_view.SetItems(g_items.data(), static_cast<int>(g_items.size()));
-  g_root_view.SetCommitCallback(&OnMenuCommit, nullptr);
+  g_menu_view.SetTitle("Main Menu");
+  g_menu_view.SetItems(g_items.data(), static_cast<int>(g_items.size()));
+  g_menu_view.SetCommitCallback(&OnMenuCommit, nullptr);
 
-  g_views.Push(&g_root_view);
+  // PlaybackView is the bottom of the view stack — the OLED "home"
+  // screen. User clicks the encoder to push the menu on top of it,
+  // long-presses inside the menu to pop back here.
+  g_views.Push(&g_playback_view);
 
   OnMenuCommit(nullptr);
   g_sequencer.Init();
@@ -341,14 +441,35 @@ static void ClockThreadMain() {
 //  OLED widget
 // ============================================================
 static void RenderOledWidget() {
+  // Render whatever view is on top of the stack into the framebuffer.
   {
     std::lock_guard<std::mutex> lk(g_mutex);
     g_views.Draw(g_oled);
   }
   ImGui::Begin("OLED 128x64");
+  // Tiny status banner — what view are we looking at?
+  const int depth = g_views.depth();
+  const char* view_name = (depth <= 1) ? "Playback"
+                         : (depth == 2) ? "Menu"
+                                       : "Editing";
+  ImGui::TextColored(ImVec4(0.65f, 0.80f, 1.00f, 1.0f), "View: %s", view_name);
+  ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 1.0f),
+                     "Space click  ← → rotate  Backspace cancel");
+  ImGui::Separator();
+
   ImDrawList* dl = ImGui::GetWindowDrawList();
-  ImVec2 p0 = ImGui::GetCursorScreenPos();
-  const float scale = 3.0f;
+  // Bezel — a slightly larger rounded rect framing the OLED.
+  const float scale  = 3.0f;
+  const float bezel  = 8.0f;
+  ImVec2 cursor      = ImGui::GetCursorScreenPos();
+  ImVec2 bz_p0(cursor.x, cursor.y);
+  ImVec2 bz_p1(bz_p0.x + 128 * scale + bezel * 2,
+               bz_p0.y + 64  * scale + bezel * 2);
+  dl->AddRectFilled(bz_p0, bz_p1, IM_COL32(28, 32, 38, 255), 6.0f);
+  dl->AddRect      (bz_p0, bz_p1, IM_COL32(80, 90, 110, 255), 6.0f, 0, 1.5f);
+
+  // Inner panel
+  ImVec2 p0(bz_p0.x + bezel, bz_p0.y + bezel);
   ImVec2 p1(p0.x + 128 * scale, p0.y + 64 * scale);
   dl->AddRectFilled(p0, p1, IM_COL32(8, 12, 20, 255));
   for (int y = 0; y < 64; ++y) {
@@ -356,11 +477,11 @@ static void RenderOledWidget() {
       if (g_oled.buf[y * 128 + x]) {
         ImVec2 a(p0.x + x * scale, p0.y + y * scale);
         ImVec2 b(a.x + scale, a.y + scale);
-        dl->AddRectFilled(a, b, IM_COL32(180, 220, 255, 255));
+        dl->AddRectFilled(a, b, IM_COL32(140, 220, 255, 255));
       }
     }
   }
-  ImGui::Dummy(ImVec2(128 * scale, 64 * scale));
+  ImGui::Dummy(ImVec2(128 * scale + bezel * 2, 64 * scale + bezel * 2));
   ImGui::End();
 }
 
@@ -369,6 +490,39 @@ static void RenderOledWidget() {
 // ============================================================
 static void RenderControlsWindow() {
   ImGui::Begin("Sequencer Controls");
+
+  // ---- Status banner at the top ----
+  {
+    char note[8];
+    DacToNoteName(g_disp_dac.load(), note, sizeof(note));
+    const int  step  = g_disp_step.load();
+    const int  steps = g_steps_item ? g_steps_item->value() : 16;
+    const bool run   = g_run_item  ? g_run_item->value()    : false;
+    const bool trig  = g_disp_trig.load();
+    const char* scale = (g_scale_idx >= 0 && g_scale_idx < seq::kNumScales)
+                        ? seq::kScales[g_scale_idx].name : "";
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 bnr_p0 = ImGui::GetCursorScreenPos();
+    const ImU32 bg     = run ? IM_COL32(28, 38, 48, 255) : IM_COL32(40, 28, 30, 255);
+    const ImU32 accent = run ? IM_COL32(120, 200, 255, 255) : IM_COL32(220, 120, 120, 255);
+    ImVec2 bnr_p1(bnr_p0.x + ImGui::GetContentRegionAvail().x, bnr_p0.y + 36);
+    dl->AddRectFilled(bnr_p0, bnr_p1, bg, 4.0f);
+    dl->AddRect      (bnr_p0, bnr_p1, accent, 4.0f, 0, 1.5f);
+    char status[40];
+    std::snprintf(status, sizeof(status), "%s   STEP %02d/%02d   %-4s   %s",
+                  run ? "PLAY" : "STOP",
+                  step + 1, steps, note,
+                  trig ? "TRIG" : "    ");
+    dl->AddText(ImVec2(bnr_p0.x + 8, bnr_p0.y + 5),
+                IM_COL32(220, 230, 240, 255), status);
+    char meta[48];
+    std::snprintf(meta, sizeof(meta), "%s   %d BPM   DAC %u",
+                  scale, g_bpm.load(),
+                  static_cast<unsigned>(g_disp_dac.load()));
+    dl->AddText(ImVec2(bnr_p0.x + 8, bnr_p0.y + 20),
+                IM_COL32(140, 160, 180, 255), meta);
+    ImGui::Dummy(ImVec2(0, 40));
+  }
 
   ImGui::SeparatorText("Internal clock");
   bool running = g_clock_running.load();
@@ -484,12 +638,17 @@ static void RenderControlsWindow() {
   }
 
   ImGui::SeparatorText("Engine inspector");
-  ImGui::Text("Step %d   DAC %u   TRIG %s",
-              g_disp_step.load(),
-              static_cast<unsigned>(g_disp_dac.load()),
-              g_disp_trig.load() ? "ON" : "off");
-  ImGui::Text("Scale notes: %d", g_scale_count);
-  ImGui::Text("Views in stack: %d", g_views.depth());
+  {
+    char note[8];
+    DacToNoteName(g_disp_dac.load(), note, sizeof(note));
+    ImGui::Text("Step %2d   Note %-4s  DAC %4u   TRIG %s",
+                g_disp_step.load(),
+                note,
+                static_cast<unsigned>(g_disp_dac.load()),
+                g_disp_trig.load() ? "ON" : "off");
+  }
+  ImGui::Text("Scale: %d notes,  Views in stack: %d",
+              g_scale_count, g_views.depth());
 
   ImDrawList* dl = ImGui::GetWindowDrawList();
   ImVec2 grid_p0 = ImGui::GetCursorScreenPos();
@@ -517,14 +676,15 @@ static void RenderControlsWindow() {
   }
   ImGui::Dummy(ImVec2(8 * (cell + gap), 2 * (cell + gap) + 6));
 
-  // Audit 3.x: CV-per-step bar chart. Each bar height = cv_sequence[i] /
-  // 4095 of the max. Visible at a glance what notes the engine is emitting
-  // per step, so you don't have to read DAC numbers and translate.
+  // CV-per-step bar chart. Each bar height = cv_sequence[i]/4095, labels
+  // below it show the note name (C3, D#4, etc.) — so you can read the
+  // pattern at a glance instead of decoding 12-bit DAC numbers.
   ImGui::SeparatorText("CV per step");
   ImVec2 bar_p0 = ImGui::GetCursorScreenPos();
-  const float bar_w     = 12.0f;
+  const float bar_w     = 22.0f;
   const float bar_gap   = 2.0f;
-  const float bar_max_h = 40.0f;
+  const float bar_max_h = 56.0f;
+  const float label_h   = 14.0f;
   for (int i = 0; i < seq::kMaxSteps; ++i) {
     const float x  = bar_p0.x + i * (bar_w + bar_gap);
     const float frac = static_cast<float>(g_disp_cv[i]) / 4095.0f;
@@ -540,21 +700,36 @@ static void RenderControlsWindow() {
     dl->AddRect(ImVec2(x, bar_p0.y),
                 ImVec2(x + bar_w, bar_p0.y + bar_max_h),
                 IM_COL32(80, 80, 80, 255));
-  }
-  ImGui::Dummy(ImVec2(seq::kMaxSteps * (bar_w + bar_gap), bar_max_h + 6));
 
-  // Audit 3.x: active scale notes (the DAC values the engine is choosing
-  // from). Useful to verify "is C major actually selecting C, D, E, F, …?"
-  // and to spot a misconfigured starting_note + octave combination.
-  ImGui::SeparatorText("Active scale notes (12-bit DAC)");
+    // Note name + step number labels under each bar
+    if (active) {
+      char note[8];
+      DacToNoteName(g_disp_cv[i], note, sizeof(note));
+      const ImVec2 tsz   = ImGui::CalcTextSize(note);
+      const float  label_x = x + (bar_w - tsz.x) / 2.0f;
+      dl->AddText(ImVec2(label_x, bar_p0.y + bar_max_h + 1),
+                  is_cur ? IM_COL32(255, 220, 120, 255)
+                         : IM_COL32(180, 200, 220, 255),
+                  note);
+    }
+  }
+  ImGui::Dummy(ImVec2(seq::kMaxSteps * (bar_w + bar_gap),
+                      bar_max_h + label_h + 6));
+
+  // Active scale notes — what notes is the engine actually choosing
+  // from? Renders as note names rather than DAC numbers ("C3 D3 E3 …"
+  // vs "1632 1768 1904 …"). Verifies that the scale + starting note +
+  // octave combination is doing what you expect.
+  ImGui::SeparatorText("Active scale notes");
   {
     std::lock_guard<std::mutex> lk(g_mutex);
     char buf[256];
     int  w = 0;
     for (int i = 0; i < g_scale_count && w < (int)sizeof(buf) - 8; ++i) {
+      char note[8];
+      DacToNoteName(g_scale[i], note, sizeof(note));
       w += std::snprintf(buf + w, sizeof(buf) - w,
-                         (i == 0) ? "%u" : ", %u",
-                         static_cast<unsigned>(g_scale[i]));
+                         (i == 0) ? "%s" : "  %s", note);
     }
     ImGui::TextWrapped("%s", buf);
   }
@@ -597,8 +772,10 @@ static void OnKey(GLFWwindow* win, int key, int /*sc*/, int action, int /*mods*/
     case GLFW_KEY_7: case GLFW_KEY_8: case GLFW_KEY_9:
       if (action == GLFW_PRESS) {
         std::lock_guard<std::mutex> lk(g_mutex);
-        if (g_views.depth() == 1) {
-          g_root_view.JumpTo(key - GLFW_KEY_1);
+        // Number-keys jump only when the menu list is on top — not from
+        // the PlaybackView home screen, and not from inside an editor.
+        if (g_views.top() == &g_menu_view) {
+          g_menu_view.JumpTo(key - GLFW_KEY_1);
         }
       }
       break;
