@@ -171,6 +171,22 @@ class NumericalItem : public MenuItem {
   int value_, min_, max_, step_;
 };
 
+// Pushes a child MenuListView on press. Used to build hierarchical menus
+// (e.g. main menu → "Clock >" → clock submenu list). Long-press in the
+// child pops back to the parent via the default View::OnLongPress.
+class SubmenuItem : public MenuItem {
+ public:
+  SubmenuItem(const char* name, MenuListView* child)
+      : name_(name), child_(child) {}
+  const char* name() const override { return name_; }
+  void  Repr(char* out, int cap) const override;
+  View* OnPressInList(ViewStack& stack, MenuListView& list) override;
+  MenuListView* child() const { return child_; }
+ private:
+  const char*   name_;
+  MenuListView* child_;
+};
+
 // One-shot action — fires a callback immediately on press, no editor pushed.
 // Used for "Clear CV" / "Clear Trig" etc. (audit 2a) where the user wants
 // a single irreversible side-effect, not an ongoing mode toggle.

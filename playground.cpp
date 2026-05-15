@@ -110,10 +110,26 @@ constexpr int          kCvSourceCount     = 3;
 constexpr const char*  kDigInModeNames[]  = { "None", "Reset", "RunStop", "Freeze" };
 constexpr int          kDigInModeCount    = 4;
 
-// Menu items + view stack
+// Menu items + view stack — hierarchical now.
+//
+//   PlaybackView  (root, depth 1)
+//     └─ g_main_menu      (depth 2)
+//         ├─ Run                       (toggle, inline)
+//         ├─ CLOCK >  → g_clock_menu   (depth 3)
+//         ├─ PITCH >  → g_pitch_menu   (depth 3)
+//         ├─ PROBS >  → g_probs_menu   (depth 3)
+//         └─ ACTIONS> → g_actions_menu (depth 3)
+//
+// Long-press pops at every level (PlaybackView at depth 1 cycles its
+// layout instead). The encoder's number-key shortcuts (1-9) jump within
+// whichever MenuListView happens to be on top.
 std::vector<const char*>  g_scale_names;
 seq::ViewStack            g_views;
-seq::MenuListView         g_menu_view;       // pushed on top of playback when user clicks
+seq::MenuListView         g_main_menu;
+seq::MenuListView         g_clock_menu;
+seq::MenuListView         g_pitch_menu;
+seq::MenuListView         g_probs_menu;
+seq::MenuListView         g_actions_menu;
 
 seq::SingleSelectItem*    g_scale_item        = nullptr;
 seq::NumericalItem*       g_cv_prob_item      = nullptr;
@@ -129,7 +145,19 @@ seq::ActionItem*          g_clear_trig_item   = nullptr;  // audit 2a
 seq::ToggleItem*          g_run_item          = nullptr;  // audit 2f
 seq::SingleSelectItem*    g_cv_source_item    = nullptr;
 seq::SingleSelectItem*    g_dig_in_item       = nullptr;  // audit 2e
-std::vector<seq::MenuItem*> g_items;
+
+// Submenu-entry items on the main menu (each pushes its child menu).
+seq::SubmenuItem*         g_clock_sub_item    = nullptr;
+seq::SubmenuItem*         g_pitch_sub_item    = nullptr;
+seq::SubmenuItem*         g_probs_sub_item    = nullptr;
+seq::SubmenuItem*         g_actions_sub_item  = nullptr;
+
+// Item arrays per menu (must outlive the MenuListViews).
+std::vector<seq::MenuItem*> g_main_items;
+std::vector<seq::MenuItem*> g_clock_items;
+std::vector<seq::MenuItem*> g_pitch_items;
+std::vector<seq::MenuItem*> g_probs_items;
+std::vector<seq::MenuItem*> g_actions_items;
 
 // Sim-only: fire a single digital-in rising/falling edge on the
 // Sequencer when the user presses D. Matches the manual-pulse pattern.
@@ -239,7 +267,7 @@ class PlaybackView : public seq::View {
 
   // Click → enter the menu.
   void OnPress() override {
-    if (stack()) stack()->Push(&g_menu_view);
+    if (stack()) stack()->Push(&g_main_menu);
   }
 
   // Long-press at the root cycles through playback layouts (instead of
@@ -481,19 +509,47 @@ static void BuildMenu() {
       "DigIn", kDigInModeNames, kDigInModeCount,
       static_cast<int>(seq::DigitalInMode::Reset));
 
-  // Order: transport-y stuff first, then params, then modes/actions.
-  g_items = {
-    g_run_item, g_scale_item,
+  // ---- Category submenus ----
+  g_clock_items = {
+    g_steps_item, g_clk_div_item, g_clk_mult_item, g_dig_in_item,
+  };
+  g_pitch_items = {
+    g_scale_item, g_octaves_item, g_start_note_item, g_cv_source_item,
+  };
+  g_probs_items = {
     g_cv_prob_item, g_trig_prob_item, g_trig_length_item,
-    g_steps_item, g_octaves_item, g_start_note_item,
-    g_clk_div_item, g_clk_mult_item,
-    g_cv_source_item, g_dig_in_item,
+  };
+  g_actions_items = {
     g_clear_cv_item, g_clear_trig_item,
   };
+  g_clock_menu  .SetTitle("Clock");
+  g_pitch_menu  .SetTitle("Pitch");
+  g_probs_menu  .SetTitle("Probs");
+  g_actions_menu.SetTitle("Actions");
+  g_clock_menu  .SetItems(g_clock_items.data(),   static_cast<int>(g_clock_items.size()));
+  g_pitch_menu  .SetItems(g_pitch_items.data(),   static_cast<int>(g_pitch_items.size()));
+  g_probs_menu  .SetItems(g_probs_items.data(),   static_cast<int>(g_probs_items.size()));
+  g_actions_menu.SetItems(g_actions_items.data(), static_cast<int>(g_actions_items.size()));
+  // Same commit callback on every menu — any commit anywhere syncs all
+  // params into the engine.
+  g_clock_menu  .SetCommitCallback(&OnMenuCommit, nullptr);
+  g_pitch_menu  .SetCommitCallback(&OnMenuCommit, nullptr);
+  g_probs_menu  .SetCommitCallback(&OnMenuCommit, nullptr);
+  g_actions_menu.SetCommitCallback(&OnMenuCommit, nullptr);
 
-  g_menu_view.SetTitle("Main Menu");
-  g_menu_view.SetItems(g_items.data(), static_cast<int>(g_items.size()));
-  g_menu_view.SetCommitCallback(&OnMenuCommit, nullptr);
+  // ---- Main menu (Run toggle + 4 category entries) ----
+  g_clock_sub_item   = new seq::SubmenuItem("Clock",   &g_clock_menu);
+  g_pitch_sub_item   = new seq::SubmenuItem("Pitch",   &g_pitch_menu);
+  g_probs_sub_item   = new seq::SubmenuItem("Probs",   &g_probs_menu);
+  g_actions_sub_item = new seq::SubmenuItem("Actions", &g_actions_menu);
+
+  g_main_items = {
+    g_run_item,
+    g_clock_sub_item, g_pitch_sub_item, g_probs_sub_item, g_actions_sub_item,
+  };
+  g_main_menu.SetTitle("Main Menu");
+  g_main_menu.SetItems(g_main_items.data(), static_cast<int>(g_main_items.size()));
+  g_main_menu.SetCommitCallback(&OnMenuCommit, nullptr);
 
   // PlaybackView is the bottom of the view stack — the OLED "home"
   // screen. User clicks the encoder to push the menu on top of it,
@@ -651,10 +707,50 @@ static void RenderOledWidget() {
 // ============================================================
 //  Sequencer Controls window
 // ============================================================
-static void RenderControlsWindow() {
-  ImGui::Begin("Sequencer Controls");
+// ============================================================
+//  Sim window — macOS-only conveniences (internal clock + audition)
+// ============================================================
+// Anything in here would NOT exist on real hardware. The OLED menu is
+// the canonical edit surface for engine params; this window only hosts
+// sim-side helpers so the user can drive the engine without an
+// external clock source.
+static void RenderSimWindow() {
+  ImGui::Begin("Sim");
 
-  // ---- Status banner at the top ----
+  ImGui::SeparatorText("Internal clock (sim only)");
+  bool running = g_clock_running.load();
+  if (ImGui::Checkbox("Clock running (S)", &running)) g_clock_running.store(running);
+  int bpm = g_bpm.load();
+  if (ImGui::SliderInt("BPM", &bpm, 20, 240)) g_bpm.store(bpm);
+
+  ImGui::SeparatorText("Audition (sim only — hear the engine)");
+  bool aud = g_audition_enabled.load();
+  if (ImGui::Checkbox("Audio on", &aud)) g_audition_enabled.store(aud);
+  float vol = g_audition_volume.load();
+  if (ImGui::SliderFloat("Volume", &vol, 0.0f, 1.0f, "%.2f")) g_audition_volume.store(vol);
+  float pitch = g_audition_pitch_semis.load();
+  if (ImGui::SliderFloat("Pitch (semis)", &pitch, -48.0f, 48.0f, "%+.1f")) g_audition_pitch_semis.store(pitch);
+  ImGui::SameLine();
+  if (ImGui::Button("0##pitch_reset")) g_audition_pitch_semis.store(0.0f);
+  float atk = g_audition_attack_ms.load();
+  if (ImGui::SliderFloat("Attack ms", &atk, 1.0f, 500.0f, "%.0f")) g_audition_attack_ms.store(atk);
+  float rel = g_audition_release_ms.load();
+  if (ImGui::SliderFloat("Release ms", &rel, 10.0f, 3000.0f, "%.0f")) g_audition_release_ms.store(rel);
+
+  ImGui::End();
+}
+
+// ============================================================
+//  Inspector window — read-only engine state visualization
+// ============================================================
+// All state shown here also exists on the OLED in some form. The point
+// is a bigger, more debuggable rendering for development. No writeable
+// controls — change params via the OLED menu (or the Encoder & Inputs
+// window's button mirror).
+static void RenderInspectorWindow() {
+  ImGui::Begin("Inspector");
+
+  // ---- Status banner ----
   {
     char note[8];
     DacToNoteName(g_disp_dac.load(), note, sizeof(note));
@@ -687,137 +783,27 @@ static void RenderControlsWindow() {
     ImGui::Dummy(ImVec2(0, 40));
   }
 
-  ImGui::SeparatorText("Internal clock");
-  bool running = g_clock_running.load();
-  if (ImGui::Checkbox("Clock running", &running)) g_clock_running.store(running);
-  int bpm = g_bpm.load();
-  if (ImGui::SliderInt("BPM", &bpm, 20, 240)) g_bpm.store(bpm);
-
-  // Audition (desktop-only) — sine + AR envelope driven by voice(0).
-  ImGui::SeparatorText("Audition (sim only — hear the engine)");
-  bool aud = g_audition_enabled.load();
-  if (ImGui::Checkbox("Audio on", &aud)) g_audition_enabled.store(aud);
-  float vol = g_audition_volume.load();
-  if (ImGui::SliderFloat("Volume", &vol, 0.0f, 1.0f, "%.2f")) g_audition_volume.store(vol);
-  float pitch = g_audition_pitch_semis.load();
-  if (ImGui::SliderFloat("Pitch (semis)", &pitch, -48.0f, 48.0f, "%+.1f")) g_audition_pitch_semis.store(pitch);
-  ImGui::SameLine();
-  if (ImGui::Button("0##pitch_reset")) g_audition_pitch_semis.store(0.0f);
-  float atk = g_audition_attack_ms.load();
-  if (ImGui::SliderFloat("Attack ms", &atk, 1.0f, 500.0f, "%.0f")) g_audition_attack_ms.store(atk);
-  float rel = g_audition_release_ms.load();
-  if (ImGui::SliderFloat("Release ms", &rel, 10.0f, 3000.0f, "%.0f")) g_audition_release_ms.store(rel);
-
-  ImGui::SeparatorText("Direct param edit (syncs to menu)");
-  bool changed = false;
-  int  cv_prob, trig_prob, trig_len, steps, octs, start_note, clk_div, clk_mult;
-  bool run;
-  int  cv_source_idx, dig_in_idx, scale_idx;
-  {
-    std::lock_guard<std::mutex> lk(g_mutex);
-    run           = g_run_item->value();
-    cv_prob       = g_cv_prob_item->value();
-    trig_prob     = g_trig_prob_item->value();
-    trig_len      = g_trig_length_item->value();
-    steps         = g_steps_item->value();
-    octs          = g_octaves_item->value();
-    start_note    = g_start_note_item->value();
-    clk_div       = g_clk_div_item->value();
-    clk_mult      = g_clk_mult_item->value();
-    cv_source_idx = g_cv_source_item->selected_index();
-    dig_in_idx    = g_dig_in_item->selected_index();
-    scale_idx     = g_scale_item->selected_index();
-  }
-  changed |= ImGui::Checkbox("Run (transport)", &run);
-
-  if (ImGui::BeginCombo("Scale", seq::kScales[scale_idx].name)) {
-    for (int i = 0; i < seq::kNumScales; ++i) {
-      bool sel = (i == scale_idx);
-      if (ImGui::Selectable(seq::kScales[i].name, sel)) {
-        scale_idx = i;
-        changed = true;
-      }
-    }
-    ImGui::EndCombo();
-  }
-  changed |= ImGui::SliderInt("Steps",         &steps,      seq::kMinSteps,   seq::kMaxSteps);
-  changed |= ImGui::SliderInt("Octaves",       &octs,       seq::kMinOctaves, seq::kMaxOctaves);
-  changed |= ImGui::SliderInt("Start note",    &start_note, 0, 36);
-  changed |= ImGui::SliderInt("Clock divider",    &clk_div,  1, 16);
-  changed |= ImGui::SliderInt("Clock multiplier", &clk_mult, 1, 16);
-  changed |= ImGui::SliderInt("CV change %",   &cv_prob,    0, 100);
-  changed |= ImGui::SliderInt("Trig change %", &trig_prob,  0, 100);
-  changed |= ImGui::SliderInt("Trig length %", &trig_len,   0, 100);
-  // One-shot actions (replace the v0.3 destructive toggles)
-  if (ImGui::Button("Clear CV (action)")) {
-    std::lock_guard<std::mutex> lk(g_mutex);
-    ActionClearCv(nullptr);
-  }
-  ImGui::SameLine();
-  if (ImGui::Button("Clear Trig (action)")) {
-    std::lock_guard<std::mutex> lk(g_mutex);
-    ActionClearTriggers(nullptr);
-  }
-  if (ImGui::BeginCombo("CV source", kCvSourceNames[cv_source_idx])) {
-    for (int i = 0; i < kCvSourceCount; ++i) {
-      bool sel = (i == cv_source_idx);
-      if (ImGui::Selectable(kCvSourceNames[i], sel)) {
-        cv_source_idx = i;
-        changed = true;
-      }
-    }
-    ImGui::EndCombo();
-  }
-  if (ImGui::BeginCombo("Digital-in mode", kDigInModeNames[dig_in_idx])) {
-    for (int i = 0; i < kDigInModeCount; ++i) {
-      bool sel = (i == dig_in_idx);
-      if (ImGui::Selectable(kDigInModeNames[i], sel)) {
-        dig_in_idx = i;
-        changed = true;
-      }
-    }
-    ImGui::EndCombo();
-  }
-  ImGui::SameLine();
-  if (ImGui::Button("Fire digital-in pulse (D)")) {
-    g_digital_pulse_request.store(true);
-  }
-
-  if (changed) {
-    std::lock_guard<std::mutex> lk(g_mutex);
-    g_run_item->set_value(run);
-    g_scale_item->set_selected_index(scale_idx);
-    g_cv_prob_item->set_value(cv_prob);
-    g_trig_prob_item->set_value(trig_prob);
-    g_trig_length_item->set_value(trig_len);
-    g_steps_item->set_value(steps);
-    g_octaves_item->set_value(octs);
-    g_start_note_item->set_value(start_note);
-    g_clk_div_item->set_value(clk_div);
-    g_clk_mult_item->set_value(clk_mult);
-    g_cv_source_item->set_selected_index(cv_source_idx);
-    g_dig_in_item->set_selected_index(dig_in_idx);
-    OnMenuCommit(nullptr);
-  }
-
-  ImGui::SeparatorText("Engine inspector");
+  // ---- Engine state line ----
   {
     char note[8];
     DacToNoteName(g_disp_dac.load(), note, sizeof(note));
-    ImGui::Text("Step %2d   Note %-4s  DAC %4u   TRIG %s",
+    ImGui::Text("Step %2d   Note %-4s   DAC %4u   TRIG %s",
                 g_disp_step.load(),
                 note,
                 static_cast<unsigned>(g_disp_dac.load()),
                 g_disp_trig.load() ? "ON" : "off");
   }
-  ImGui::Text("Scale: %d notes,  Views in stack: %d",
+  ImGui::Text("Scale: %d notes   Views in stack: %d",
               g_scale_count, g_views.depth());
 
+  // ---- Step grid ----
+  ImGui::SeparatorText("Step grid");
+  const int   step  = g_disp_step.load();
+  const int   steps = g_steps_item ? g_steps_item->value() : 16;
   ImDrawList* dl = ImGui::GetWindowDrawList();
   ImVec2 grid_p0 = ImGui::GetCursorScreenPos();
   const float cell  = 18.0f;
   const float gap   = 3.0f;
-  const int   step  = g_disp_step.load();
   for (int i = 0; i < seq::kMaxSteps; ++i) {
     const int   col = i % 8;
     const int   row = i / 8;
@@ -916,9 +902,21 @@ static void DoEncoderLongPress() {
   std::lock_guard<std::mutex> lk(g_mutex);
   g_views.OnLongPress();
 }
+// Returns the MenuListView currently on top, or nullptr if the top view
+// isn't a menu list (PlaybackView, an editor view, etc.). Used by the
+// number-key / Encoder-window-button shortcuts which should only jump
+// when we're actually inside a list.
+static seq::MenuListView* TopMenuList() {
+  seq::View* top = g_views.top();
+  seq::MenuListView* candidates[] = {
+    &g_main_menu, &g_clock_menu, &g_pitch_menu, &g_probs_menu, &g_actions_menu
+  };
+  for (auto* m : candidates) if (m == top) return m;
+  return nullptr;
+}
 static void DoMenuJump(int index) {
   std::lock_guard<std::mutex> lk(g_mutex);
-  if (g_views.top() == &g_menu_view) g_menu_view.JumpTo(index);
+  if (auto* m = TopMenuList()) m->JumpTo(index);
 }
 static void DoCyclePlaybackLayout() {
   std::lock_guard<std::mutex> lk(g_mutex);
@@ -941,13 +939,8 @@ static void RenderEncoderInputsWindow() {
   if (ImGui::Button("LONG PRESS (back / cancel)", ImVec2(0, 0))) DoEncoderLongPress();
   if (ImGui::Button("Cycle playback layout (V)", ImVec2(0, 0))) DoCyclePlaybackLayout();
 
-  // ---- Transport / inputs ----
-  ImGui::SeparatorText("Transport & jacks");
-  bool running = g_clock_running.load();
-  if (ImGui::Checkbox("Internal clock running", &running)) g_clock_running.store(running);
-  int bpm = g_bpm.load();
-  if (ImGui::SliderInt("BPM", &bpm, 20, 240)) g_bpm.store(bpm);
-
+  // ---- Jacks (mirror what's physically wired on the panel) ----
+  ImGui::SeparatorText("Jacks");
   if (ImGui::Button("Manual clock pulse"))  g_manual_pulse_request.store(true);
   ImGui::SameLine();
   if (ImGui::Button("Digital-in pulse"))    g_digital_pulse_request.store(true);
@@ -955,8 +948,8 @@ static void RenderEncoderInputsWindow() {
   if (ImGui::Button("RESET"))               g_reset_request.store(true);
 
   // ---- Menu jumps (1..9) ----
-  ImGui::SeparatorText("Menu shortcuts (only when menu is on top)");
-  const bool in_menu = (g_views.top() == &g_menu_view);
+  ImGui::SeparatorText("Menu shortcuts (only when a menu is on top)");
+  const bool in_menu = (TopMenuList() != nullptr);
   if (!in_menu) ImGui::BeginDisabled();
   for (int i = 1; i <= 9; ++i) {
     char lbl[3] = { static_cast<char>('0' + i), 0, 0 };
@@ -1158,7 +1151,8 @@ int main() {
     ImGui::NewFrame();
     RenderOledWidget();
     RenderEncoderInputsWindow();
-    RenderControlsWindow();
+    RenderSimWindow();
+    RenderInspectorWindow();
     ImGui::Render();
 
     int w, h; glfwGetFramebufferSize(win, &w, &h);

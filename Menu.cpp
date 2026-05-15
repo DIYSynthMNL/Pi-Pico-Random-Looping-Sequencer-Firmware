@@ -129,6 +129,19 @@ void NumericalItem::Repr(char* out, int cap) const {
 }
 
 // ============================================================
+//  SubmenuItem
+// ============================================================
+void SubmenuItem::Repr(char* out, int cap) const {
+  // "Name >" — the right-pointing arrow signals "press to descend".
+  std::snprintf(out, cap, "%s >", name_);
+}
+
+View* SubmenuItem::OnPressInList(ViewStack& /*stack*/,
+                                 MenuListView& /*list*/) {
+  return child_;     // ViewStack::Push handles ownership / depth
+}
+
+// ============================================================
 //  ActionItem
 // ============================================================
 void ActionItem::Repr(char* out, int cap) const {
