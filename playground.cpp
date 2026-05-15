@@ -163,7 +163,23 @@ std::vector<seq::MenuItem*> g_actions_items;
 // Sequencer when the user presses D. Matches the manual-pulse pattern.
 std::atomic<bool>      g_digital_pulse_request{false};
 
+// Per-window visibility — toggled from the View menu at the top.
+bool g_show_oled       = true;
+bool g_show_hardware   = true;
+bool g_show_quicknav   = true;
+bool g_show_params     = true;
+bool g_show_sim        = true;
+bool g_show_inspector  = true;
+
 }  // namespace
+
+// ============================================================
+//  Forward decls for input helpers used by the Sim window before
+//  their definitions appear below.
+// ============================================================
+static void DoCyclePlaybackLayout();
+static void DoTogglePlay();
+static void DoTapTempo();
 
 // ============================================================
 //  Scale rebuild
@@ -486,7 +502,7 @@ static void BuildMenu() {
   for (int i = 0; i < seq::kNumScales; ++i)
     g_scale_names.push_back(seq::kScales[i].name);
 
-  g_run_item          = new seq::ToggleItem("Run", true);
+  g_run_item          = new seq::ToggleItem("Play", true);
   g_scale_item        = new seq::SingleSelectItem(
       "Scale", g_scale_names.data(), seq::kNumScales, g_scale_idx);
   g_cv_prob_item      = new seq::NumericalItem("CVProb",    0,  0, 100, 5);
@@ -665,6 +681,8 @@ static void RenderOledWidget() {
     std::lock_guard<std::mutex> lk(g_mutex);
     g_views.Draw(g_oled);
   }
+  ImGui::SetNextWindowPos (ImVec2(10, 30),  ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(440, 350), ImGuiCond_FirstUseEver);
   ImGui::Begin("OLED 128x64");
   // Tiny status banner — what view are we looking at?
   const int depth = g_views.depth();
@@ -715,27 +733,33 @@ static void RenderOledWidget() {
 // sim-side helpers so the user can drive the engine without an
 // external clock source.
 static void RenderSimWindow() {
+  ImGui::SetNextWindowPos (ImVec2(470, 30),  ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(400, 350), ImGuiCond_FirstUseEver);
   ImGui::Begin("Sim");
 
-  ImGui::SeparatorText("Internal clock (sim only)");
+  ImGui::SeparatorText("Internal clock generator");
   bool running = g_clock_running.load();
-  if (ImGui::Checkbox("Clock running (S)", &running)) g_clock_running.store(running);
+  if (ImGui::Checkbox("Generator running (S)", &running)) g_clock_running.store(running);
   int bpm = g_bpm.load();
   if (ImGui::SliderInt("BPM", &bpm, 20, 240)) g_bpm.store(bpm);
+  if (ImGui::Button("Tap tempo (T)", ImVec2(160, 0))) DoTapTempo();
+  ImGui::SameLine();
+  ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
+                     "tap 2+ times to set BPM from interval");
 
-  ImGui::SeparatorText("Audition (sim only — hear the engine)");
+  ImGui::SeparatorText("Audition — hear the engine");
   bool aud = g_audition_enabled.load();
-  if (ImGui::Checkbox("Audio on", &aud)) g_audition_enabled.store(aud);
+  if (ImGui::Checkbox("Audio on (A)", &aud)) g_audition_enabled.store(aud);
   float vol = g_audition_volume.load();
-  if (ImGui::SliderFloat("Volume", &vol, 0.0f, 1.0f, "%.2f")) g_audition_volume.store(vol);
+  if (ImGui::SliderFloat("Volume",        &vol,   0.0f, 1.0f,    "%.2f")) g_audition_volume.store(vol);
   float pitch = g_audition_pitch_semis.load();
   if (ImGui::SliderFloat("Pitch (semis)", &pitch, -48.0f, 48.0f, "%+.1f")) g_audition_pitch_semis.store(pitch);
   ImGui::SameLine();
   if (ImGui::Button("0##pitch_reset")) g_audition_pitch_semis.store(0.0f);
   float atk = g_audition_attack_ms.load();
-  if (ImGui::SliderFloat("Attack ms", &atk, 1.0f, 500.0f, "%.0f")) g_audition_attack_ms.store(atk);
+  if (ImGui::SliderFloat("Attack ms",     &atk,   1.0f,  500.0f,  "%.0f")) g_audition_attack_ms.store(atk);
   float rel = g_audition_release_ms.load();
-  if (ImGui::SliderFloat("Release ms", &rel, 10.0f, 3000.0f, "%.0f")) g_audition_release_ms.store(rel);
+  if (ImGui::SliderFloat("Release ms",    &rel,  10.0f, 3000.0f,  "%.0f")) g_audition_release_ms.store(rel);
 
   ImGui::End();
 }
@@ -748,6 +772,8 @@ static void RenderSimWindow() {
 // controls — change params via the OLED menu (or the Encoder & Inputs
 // window's button mirror).
 static void RenderInspectorWindow() {
+  ImGui::SetNextWindowPos (ImVec2(880, 30),  ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(510, 510), ImGuiCond_FirstUseEver);
   ImGui::Begin("Inspector");
 
   // ---- Status banner ----
@@ -923,6 +949,34 @@ static void DoCyclePlaybackLayout() {
   g_playback_view.CycleLayout();
 }
 
+// Transport toggle — flips engine "Play" param via the menu item, which
+// also fires OnMenuCommit so the engine and all other surfaces see the
+// change. Bound to P key + big PLAY/STOP banner button.
+static void DoTogglePlay() {
+  std::lock_guard<std::mutex> lk(g_mutex);
+  if (g_run_item) {
+    g_run_item->set_value(!g_run_item->value());
+    OnMenuCommit(nullptr);
+  }
+}
+
+// Tap-tempo (sim only — drives the internal-clock BPM). On each tap, if
+// the interval since the previous tap is in a musical range (200..3000 ms
+// → 20..300 BPM), set g_bpm. First tap of a session just records the
+// timestamp.
+static std::atomic<uint32_t> g_last_tap_ms_{0};
+static void DoTapTempo() {
+  const auto now_ms = static_cast<uint32_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count());
+  const uint32_t last = g_last_tap_ms_.exchange(now_ms);
+  if (last == 0) return;
+  const uint32_t interval = now_ms - last;
+  if (interval < 200 || interval > 3000) return;     // outside musical range
+  const int new_bpm = 60000 / static_cast<int>(interval);
+  if (new_bpm >= 20 && new_bpm <= 240) g_bpm.store(new_bpm);
+}
+
 // Direct navigation — the sim doesn't have to play the "encoder dance"
 // to get into the menu. These helpers manipulate the view stack
 // directly so a mouse-driven user can jump anywhere in one click.
@@ -954,25 +1008,26 @@ static void DoBack() {
 // reset jack. Use this view to feel out the hardware UX. Anything
 // here will match the physical module.
 static void RenderHardwareWindow() {
+  ImGui::SetNextWindowPos (ImVec2(470, 390), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(400, 350), ImGuiCond_FirstUseEver);
   ImGui::Begin("Hardware (mirror)");
 
   ImGui::SeparatorText("Encoder");
-  if (ImGui::Button("<<  rotate left",  ImVec2(140, 0))) DoEncoderRotate(-1);
+  if (ImGui::Button("Rotate -",     ImVec2(100, 0))) DoEncoderRotate(-1);
   ImGui::SameLine();
-  if (ImGui::Button("CLICK",            ImVec2(80, 0)))  DoEncoderPress();
+  if (ImGui::Button("Click",        ImVec2(100, 0))) DoEncoderPress();
   ImGui::SameLine();
-  if (ImGui::Button("rotate right  >>", ImVec2(140, 0))) DoEncoderRotate(+1);
-  if (ImGui::Button("LONG PRESS (back / cancel)", ImVec2(0, 0))) DoEncoderLongPress();
+  if (ImGui::Button("Rotate +",     ImVec2(100, 0))) DoEncoderRotate(+1);
+  if (ImGui::Button("Long press (back / cancel)", ImVec2(-FLT_MIN, 0))) DoEncoderLongPress();
 
   ImGui::SeparatorText("Jacks");
-  if (ImGui::Button("Manual clock pulse (G)"))  g_manual_pulse_request.store(true);
+  if (ImGui::Button("Manual clock (G)", ImVec2(140, 0))) g_manual_pulse_request.store(true);
   ImGui::SameLine();
-  if (ImGui::Button("Digital-in pulse (D)"))    g_digital_pulse_request.store(true);
-  ImGui::SameLine();
-  if (ImGui::Button("RESET (R)"))               g_reset_request.store(true);
+  if (ImGui::Button("Digital in (D)",   ImVec2(140, 0))) g_digital_pulse_request.store(true);
+  if (ImGui::Button("Reset (R)",        ImVec2(140, 0))) g_reset_request.store(true);
 
-  ImGui::SeparatorText("Keyboard reference");
-  ImGui::BeginTable("keys", 2, ImGuiTableFlags_SizingFixedFit);
+  ImGui::SeparatorText("Hardware keyboard reference");
+  ImGui::BeginTable("hwkeys", 2, ImGuiTableFlags_SizingFixedFit);
   auto row = [](const char* k, const char* v) {
     ImGui::TableNextRow();
     ImGui::TableNextColumn(); ImGui::TextColored(ImVec4(0.8f, 0.9f, 1.0f, 1.0f), "%s", k);
@@ -980,16 +1035,10 @@ static void RenderHardwareWindow() {
   };
   row("Left / Right", "Encoder rotate");
   row("Space",        "Encoder click");
-  row("Backspace",    "Long-press / cancel / back");
+  row("Backspace",    "Long-press / back / cancel");
   row("G",            "Manual clock pulse");
   row("D",            "Digital-in pulse");
   row("R",            "Reset transport");
-  row("S",            "Toggle internal clock  (sim-only)");
-  row("V",            "Cycle playback layout  (sim-only)");
-  row("M",            "Open main menu         (sim-only)");
-  row("H",            "Home                   (sim-only)");
-  row("1 .. 9",       "Jump to menu item N");
-  row("Esc / Q",      "Quit");
   ImGui::EndTable();
 
   ImGui::End();
@@ -1004,18 +1053,17 @@ static void RenderHardwareWindow() {
 // sliders — the encoder + menu is the only path. Sim users can use
 // whichever they prefer.
 static void RenderParamsWindow() {
+  ImGui::SetNextWindowPos (ImVec2(10, 390),  ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(440, 510), ImGuiCond_FirstUseEver);
   ImGui::Begin("Params (sim direct edit)");
-  ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
-                     "Direct sliders — syncs both ways with the OLED menu.");
-  ImGui::Separator();
 
   bool changed = false;
-  bool run, cv_erase_unused;  // no longer applicable; keep var to avoid clutter
   int  cv_prob, trig_prob, trig_len, steps, octs, start_note, clk_div, clk_mult;
+  bool play_on;
   int  cv_source_idx, dig_in_idx, scale_idx;
   {
     std::lock_guard<std::mutex> lk(g_mutex);
-    run           = g_run_item->value();
+    play_on       = g_run_item->value();
     cv_prob       = g_cv_prob_item->value();
     trig_prob     = g_trig_prob_item->value();
     trig_len      = g_trig_length_item->value();
@@ -1028,10 +1076,29 @@ static void RenderParamsWindow() {
     dig_in_idx    = g_dig_in_item->selected_index();
     scale_idx     = g_scale_item->selected_index();
   }
-  (void)cv_erase_unused;
 
-  ImGui::SeparatorText("Transport");
-  changed |= ImGui::Checkbox("Run", &run);
+  // ---- Big PLAY/STOP banner at the top ----
+  // Green when stopped (press to play), red when playing (press to stop).
+  // Bound to the P keyboard shortcut as well.
+  {
+    const ImU32 play_color    = IM_COL32( 70, 170,  90, 255);
+    const ImU32 play_hovered  = IM_COL32( 90, 200, 110, 255);
+    const ImU32 play_active   = IM_COL32( 50, 140,  70, 255);
+    const ImU32 stop_color    = IM_COL32(200,  80,  70, 255);
+    const ImU32 stop_hovered  = IM_COL32(220, 100,  90, 255);
+    const ImU32 stop_active   = IM_COL32(170,  60,  50, 255);
+    const bool  on = play_on;
+    ImGui::PushStyleColor(ImGuiCol_Button,        on ? stop_color   : play_color);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, on ? stop_hovered : play_hovered);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  on ? stop_active  : play_active);
+    if (ImGui::Button(on ? "STOP  (P)" : "PLAY  (P)", ImVec2(-FLT_MIN, 40))) {
+      DoTogglePlay();
+    }
+    ImGui::PopStyleColor(3);
+  }
+  ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
+                     "Direct sliders — syncs both ways with the OLED menu.");
+  ImGui::Separator();
 
   ImGui::SeparatorText("Pitch");
   if (ImGui::BeginCombo("Scale", seq::kScales[scale_idx].name)) {
@@ -1078,19 +1145,23 @@ static void RenderParamsWindow() {
   changed |= ImGui::SliderInt("Trig length %", &trig_len,   0, 100);
 
   ImGui::SeparatorText("Actions");
-  if (ImGui::Button("Clear CV", ImVec2(120, 0))) {
+  ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(140, 50, 50, 255));
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(180, 70, 70, 255));
+  ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(110, 40, 40, 255));
+  if (ImGui::Button("Clear CV", ImVec2(140, 0))) {
     std::lock_guard<std::mutex> lk(g_mutex);
     ActionClearCv(nullptr);
   }
   ImGui::SameLine();
-  if (ImGui::Button("Clear Trig", ImVec2(120, 0))) {
+  if (ImGui::Button("Clear Trig", ImVec2(140, 0))) {
     std::lock_guard<std::mutex> lk(g_mutex);
     ActionClearTriggers(nullptr);
   }
+  ImGui::PopStyleColor(3);
 
   if (changed) {
     std::lock_guard<std::mutex> lk(g_mutex);
-    g_run_item       ->set_value(run);
+    g_run_item       ->set_value(play_on);
     g_scale_item     ->set_selected_index(scale_idx);
     g_cv_prob_item   ->set_value(cv_prob);
     g_trig_prob_item ->set_value(trig_prob);
@@ -1117,6 +1188,8 @@ static void RenderParamsWindow() {
 // by the Hardware window's encoder mirror) is still the canonical edit
 // surface, and the same actions are reachable that way.
 static void RenderQuickNavWindow() {
+  ImGui::SetNextWindowPos (ImVec2(880, 550), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(510, 350), ImGuiCond_FirstUseEver);
   ImGui::Begin("Quick Nav (sim only)");
 
   ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
@@ -1124,23 +1197,20 @@ static void RenderQuickNavWindow() {
   ImGui::Separator();
 
   ImGui::SeparatorText("Navigation");
-  if (ImGui::Button("MENU (M)", ImVec2(120, 30))) DoOpenMainMenu();
+  if (ImGui::Button("MENU  (M)", ImVec2(160, 36))) DoOpenMainMenu();
   ImGui::SameLine();
-  if (ImGui::Button("BACK",     ImVec2(80, 30)))  DoBack();
+  if (ImGui::Button("BACK",      ImVec2(100, 36))) DoBack();
   ImGui::SameLine();
-  if (ImGui::Button("HOME (H)", ImVec2(120, 30))) DoGoHome();
+  if (ImGui::Button("HOME  (H)", ImVec2(160, 36))) DoGoHome();
 
   ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Jump straight to a category:");
-  if (ImGui::Button("Clock",   ImVec2(80, 0))) DoOpenSubmenu(&g_clock_menu);
+  if (ImGui::Button("Clock",   ImVec2(100, 0))) DoOpenSubmenu(&g_clock_menu);
   ImGui::SameLine();
-  if (ImGui::Button("Pitch",   ImVec2(80, 0))) DoOpenSubmenu(&g_pitch_menu);
+  if (ImGui::Button("Pitch",   ImVec2(100, 0))) DoOpenSubmenu(&g_pitch_menu);
   ImGui::SameLine();
-  if (ImGui::Button("Probs",   ImVec2(80, 0))) DoOpenSubmenu(&g_probs_menu);
+  if (ImGui::Button("Probs",   ImVec2(100, 0))) DoOpenSubmenu(&g_probs_menu);
   ImGui::SameLine();
-  if (ImGui::Button("Actions", ImVec2(80, 0))) DoOpenSubmenu(&g_actions_menu);
-
-  ImGui::SeparatorText("Playback");
-  if (ImGui::Button("Cycle playback layout (V)", ImVec2(0, 0))) DoCyclePlaybackLayout();
+  if (ImGui::Button("Actions", ImVec2(100, 0))) DoOpenSubmenu(&g_actions_menu);
 
   ImGui::SeparatorText("Menu shortcuts (only when a menu is on top)");
   const bool in_menu = (TopMenuList() != nullptr);
@@ -1151,6 +1221,24 @@ static void RenderQuickNavWindow() {
     if (ImGui::Button(lbl, ImVec2(28, 0))) DoMenuJump(i - 1);
   }
   if (!in_menu) ImGui::EndDisabled();
+
+  ImGui::SeparatorText("Sim-only keyboard reference");
+  ImGui::BeginTable("simkeys", 2, ImGuiTableFlags_SizingFixedFit);
+  auto row = [](const char* k, const char* v) {
+    ImGui::TableNextRow();
+    ImGui::TableNextColumn(); ImGui::TextColored(ImVec4(0.8f, 0.9f, 1.0f, 1.0f), "%s", k);
+    ImGui::TableNextColumn(); ImGui::Text("%s", v);
+  };
+  row("P",       "Play / Stop transport");
+  row("S",       "Toggle internal clock generator");
+  row("T",       "Tap tempo");
+  row("V",       "Cycle playback layout (Grid / Piano Roll)");
+  row("M",       "Open main menu");
+  row("H",       "Home — return to playback view");
+  row("A",       "Toggle audition audio");
+  row("1 .. 9",  "Jump to menu item N");
+  row("Esc / Q", "Quit");
+  ImGui::EndTable();
 
   ImGui::End();
 }
@@ -1196,6 +1284,17 @@ static void OnKey(GLFWwindow* win, int key, int /*sc*/, int action, int /*mods*/
       break;
     case GLFW_KEY_H:
       if (action == GLFW_PRESS) DoGoHome();
+      break;
+    case GLFW_KEY_P:
+      if (action == GLFW_PRESS) DoTogglePlay();
+      break;
+    case GLFW_KEY_T:
+      if (action == GLFW_PRESS) DoTapTempo();
+      break;
+    case GLFW_KEY_A:
+      if (action == GLFW_PRESS) {
+        g_audition_enabled.store(!g_audition_enabled.load());
+      }
       break;
     case GLFW_KEY_ESCAPE:
     case GLFW_KEY_Q:
@@ -1290,7 +1389,7 @@ int main() {
   glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
 
   GLFWwindow* win = glfwCreateWindow(
-      1100, 720, "Generative Sequencer — Playground", nullptr, nullptr);
+      1400, 920, "Generative Sequencer — Playground", nullptr, nullptr);
   if (!win) { glfwTerminate(); return 1; }
   glfwMakeContextCurrent(win);
   glfwSwapInterval(1);
@@ -1329,12 +1428,46 @@ int main() {
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
-    RenderOledWidget();
-    RenderHardwareWindow();
-    RenderQuickNavWindow();
-    RenderParamsWindow();
-    RenderSimWindow();
-    RenderInspectorWindow();
+    // ---- Main menu bar — view toggles, key hints ----
+    if (ImGui::BeginMainMenuBar()) {
+      if (ImGui::BeginMenu("View")) {
+        ImGui::MenuItem("OLED 128x64",         nullptr, &g_show_oled);
+        ImGui::MenuItem("Hardware (mirror)",   nullptr, &g_show_hardware);
+        ImGui::MenuItem("Quick Nav",           nullptr, &g_show_quicknav);
+        ImGui::MenuItem("Params",              nullptr, &g_show_params);
+        ImGui::MenuItem("Sim",                 nullptr, &g_show_sim);
+        ImGui::MenuItem("Inspector",           nullptr, &g_show_inspector);
+        ImGui::Separator();
+        if (ImGui::MenuItem("Show all"))    {
+          g_show_oled = g_show_hardware = g_show_quicknav =
+          g_show_params = g_show_sim = g_show_inspector = true;
+        }
+        if (ImGui::MenuItem("OLED + Hardware only")) {
+          g_show_oled = g_show_hardware = true;
+          g_show_quicknav = g_show_params = g_show_sim = g_show_inspector = false;
+        }
+        ImGui::EndMenu();
+      }
+      if (ImGui::BeginMenu("Transport")) {
+        bool playing = false;
+        {
+          std::lock_guard<std::mutex> lk(g_mutex);
+          if (g_run_item) playing = g_run_item->value();
+        }
+        if (ImGui::MenuItem(playing ? "Stop  (P)" : "Play  (P)")) DoTogglePlay();
+        if (ImGui::MenuItem("Reset transport (R)")) g_reset_request.store(true);
+        if (ImGui::MenuItem("Tap tempo (T)"))      DoTapTempo();
+        ImGui::EndMenu();
+      }
+      ImGui::EndMainMenuBar();
+    }
+
+    if (g_show_oled)      RenderOledWidget();
+    if (g_show_hardware)  RenderHardwareWindow();
+    if (g_show_quicknav)  RenderQuickNavWindow();
+    if (g_show_params)    RenderParamsWindow();
+    if (g_show_sim)       RenderSimWindow();
+    if (g_show_inspector) RenderInspectorWindow();
     ImGui::Render();
 
     int w, h; glfwGetFramebufferSize(win, &w, &h);
