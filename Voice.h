@@ -74,6 +74,12 @@ class Voice {
   void ClearCv(const uint16_t* scale, int scale_length);
   void ClearTriggers();
 
+  // Bulk-load both per-step arrays. Used by the sim's persistence
+  // layer to restore the live mutated state after restart. `cv` and
+  // `trig` must each point to kMaxSteps entries. Pass nullptr to skip
+  // either side.
+  void SetSequences(const uint16_t* cv, const uint8_t* trig);
+
   void SetParams(const VoiceParams& p) { params_ = p; }
   void Seed(uint64_t s) { rng_.seed(static_cast<uint32_t>(s)); }
 

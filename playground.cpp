@@ -203,6 +203,17 @@ static seq::View* MainView();
 // to sync into engine params — declared below, used above.
 static void OnMenuCommit(void*);
 
+// Persistence helpers — defined further down so they can reference
+// PlaybackView / Voice / etc., but forward-declared here because
+// OnMenuCommit calls SaveStateLocked.
+static void SaveStateLocked();
+static void LoadStateLocked();
+
+// Suppressed during BuildMenu's startup sequence so the first
+// OnMenuCommit doesn't write a half-initialised state to disk.
+static bool g_state_loading = false;
+
+
 // ============================================================
 //  Scale rebuild
 // ============================================================
@@ -488,6 +499,133 @@ class PlaybackView : public seq::View {
 };
 
 PlaybackView g_playback_view;
+// ============================================================
+//  Persistence — save/reload sim state across launches
+// ============================================================
+// All edits (menu commits, Sim window slider changes, layout toggles)
+// are saved to ./playground.state. Atomic write via .tmp + rename.
+// On launch, LoadState restores values into the menu items + sim
+// atomics + the live cv/trig sequences. If the file is missing or a
+// key is unknown, the corresponding default applies.
+//
+// Both Save and Load assume the caller holds g_mutex.
+
+static constexpr const char* kStatePath    = "./playground.state";
+static constexpr const char* kStateTmpPath = "./playground.state.tmp";
+
+static void SaveStateLocked() {
+  if (g_state_loading) return;   // skip during BuildMenu's setup
+  std::FILE* f = std::fopen(kStateTmpPath, "w");
+  if (!f) return;
+  std::fprintf(f, "# seq playground state — auto-saved\n");
+  // Menu items
+  std::fprintf(f, "play=%d\n",            g_run_item        ? (g_run_item->value() ? 1 : 0) : 0);
+  std::fprintf(f, "scale_idx=%d\n",       g_scale_item      ? g_scale_item->selected_index() : 0);
+  std::fprintf(f, "octaves=%d\n",         g_octaves_item    ? g_octaves_item->value() : 1);
+  std::fprintf(f, "start_note=%d\n",      g_start_note_item ? g_start_note_item->value() : 0);
+  std::fprintf(f, "steps=%d\n",           g_steps_item      ? g_steps_item->value() : 16);
+  std::fprintf(f, "step_rate_idx=%d\n",   g_step_rate_item  ? g_step_rate_item->selected_index() : kStepRateDefault);
+  std::fprintf(f, "cv_change_pct=%d\n",   g_cv_prob_item    ? g_cv_prob_item->value() : 0);
+  std::fprintf(f, "trig_change_pct=%d\n", g_trig_prob_item  ? g_trig_prob_item->value() : 0);
+  std::fprintf(f, "trig_length_pct=%d\n", g_trig_length_item? g_trig_length_item->value() : 50);
+  std::fprintf(f, "cv_source_idx=%d\n",   g_cv_source_item  ? g_cv_source_item->selected_index() : 0);
+  std::fprintf(f, "dig_in_idx=%d\n",      g_dig_in_item     ? g_dig_in_item->selected_index() : 1);
+  // Sim
+  std::fprintf(f, "clock_running=%d\n",        g_clock_running.load() ? 1 : 0);
+  std::fprintf(f, "bpm=%d\n",                  g_bpm.load());
+  std::fprintf(f, "audition_enabled=%d\n",     g_audition_enabled.load() ? 1 : 0);
+  std::fprintf(f, "audition_volume=%f\n",      g_audition_volume.load());
+  std::fprintf(f, "audition_pitch_semis=%f\n", g_audition_pitch_semis.load());
+  std::fprintf(f, "audition_attack_ms=%f\n",   g_audition_attack_ms.load());
+  std::fprintf(f, "audition_release_ms=%f\n",  g_audition_release_ms.load());
+  std::fprintf(f, "playback_layout=%d\n",
+               static_cast<int>(g_playback_view.layout()));
+
+  // Live sequences (the user's mutating pattern)
+  const seq::Voice& v = g_sequencer.voice(0);
+  const uint16_t* cv = v.cv_sequence();
+  const uint8_t*  tr = v.trigger_sequence();
+  std::fprintf(f, "cv_sequence=");
+  for (int i = 0; i < seq::kMaxSteps; ++i)
+    std::fprintf(f, "%s%u", i ? "," : "", static_cast<unsigned>(cv[i]));
+  std::fprintf(f, "\n");
+  std::fprintf(f, "trigger_sequence=");
+  for (int i = 0; i < seq::kMaxSteps; ++i)
+    std::fprintf(f, "%s%u", i ? "," : "", static_cast<unsigned>(tr[i]));
+  std::fprintf(f, "\n");
+
+  std::fclose(f);
+  std::rename(kStateTmpPath, kStatePath);
+}
+
+static void LoadStateLocked() {
+  std::FILE* f = std::fopen(kStatePath, "r");
+  if (!f) return;
+  char line[2048];
+  uint16_t cv_buf[seq::kMaxSteps]  = {0};
+  uint8_t  tr_buf[seq::kMaxSteps]  = {0};
+  bool     have_cv = false, have_tr = false;
+  while (std::fgets(line, sizeof(line), f)) {
+    if (line[0] == '#' || line[0] == '\n' || line[0] == 0) continue;
+    char* eq = std::strchr(line, '=');
+    if (!eq) continue;
+    *eq = 0;
+    const char* key = line;
+    char* val = eq + 1;
+    char* nl = std::strchr(val, '\n');
+    if (nl) *nl = 0;
+
+    auto i = [&]() { return std::atoi(val); };
+    auto fl = [&]() { return static_cast<float>(std::atof(val)); };
+
+    if      (!std::strcmp(key, "play"))            { if (g_run_item)        g_run_item->set_value(i() != 0); }
+    else if (!std::strcmp(key, "scale_idx"))       { if (g_scale_item)      g_scale_item->set_selected_index(i()); }
+    else if (!std::strcmp(key, "octaves"))         { if (g_octaves_item)    g_octaves_item->set_value(i()); }
+    else if (!std::strcmp(key, "start_note"))      { if (g_start_note_item) g_start_note_item->set_value(i()); }
+    else if (!std::strcmp(key, "steps"))           { if (g_steps_item)      g_steps_item->set_value(i()); }
+    else if (!std::strcmp(key, "step_rate_idx"))   { if (g_step_rate_item)  g_step_rate_item->set_selected_index(i()); }
+    else if (!std::strcmp(key, "cv_change_pct"))   { if (g_cv_prob_item)    g_cv_prob_item->set_value(i()); }
+    else if (!std::strcmp(key, "trig_change_pct")) { if (g_trig_prob_item)  g_trig_prob_item->set_value(i()); }
+    else if (!std::strcmp(key, "trig_length_pct")) { if (g_trig_length_item)g_trig_length_item->set_value(i()); }
+    else if (!std::strcmp(key, "cv_source_idx"))   { if (g_cv_source_item)  g_cv_source_item->set_selected_index(i()); }
+    else if (!std::strcmp(key, "dig_in_idx"))      { if (g_dig_in_item)     g_dig_in_item->set_selected_index(i()); }
+    else if (!std::strcmp(key, "clock_running"))   { g_clock_running.store(i() != 0); }
+    else if (!std::strcmp(key, "bpm"))             { g_bpm.store(i()); }
+    else if (!std::strcmp(key, "audition_enabled")) { g_audition_enabled.store(i() != 0); }
+    else if (!std::strcmp(key, "audition_volume"))      { g_audition_volume.store(fl()); }
+    else if (!std::strcmp(key, "audition_pitch_semis")) { g_audition_pitch_semis.store(fl()); }
+    else if (!std::strcmp(key, "audition_attack_ms"))   { g_audition_attack_ms.store(fl()); }
+    else if (!std::strcmp(key, "audition_release_ms"))  { g_audition_release_ms.store(fl()); }
+    else if (!std::strcmp(key, "playback_layout"))  {
+      // We don't have a public setter; cycle the layout until it matches
+      const int target = i();
+      for (int n = 0; n < 8 && static_cast<int>(g_playback_view.layout()) != target; ++n) {
+        g_playback_view.CycleLayout();
+      }
+    }
+    else if (!std::strcmp(key, "cv_sequence")) {
+      int n = 0;
+      for (char* tok = std::strtok(val, ","); tok && n < seq::kMaxSteps;
+           tok = std::strtok(nullptr, ",")) {
+        cv_buf[n++] = static_cast<uint16_t>(std::atoi(tok));
+      }
+      if (n == seq::kMaxSteps) have_cv = true;
+    }
+    else if (!std::strcmp(key, "trigger_sequence")) {
+      int n = 0;
+      for (char* tok = std::strtok(val, ","); tok && n < seq::kMaxSteps;
+           tok = std::strtok(nullptr, ",")) {
+        tr_buf[n++] = static_cast<uint8_t>(std::atoi(tok) != 0);
+      }
+      if (n == seq::kMaxSteps) have_tr = true;
+    }
+  }
+  std::fclose(f);
+  if (have_cv || have_tr) {
+    g_sequencer.voice(0).SetSequences(have_cv ? cv_buf : nullptr,
+                                      have_tr ? tr_buf : nullptr);
+  }
+}
 
 // ============================================================
 //  MainMenuView — the OLED "home menu" rendered graphically
@@ -610,6 +748,7 @@ static void OnMenuCommit(void* /*user*/) {
 
   g_sequencer.voice(0).SetParams(g_vparams);
   RebuildScale_locked();   // also re-applies g_sparams via Sequencer::SetParams
+  SaveStateLocked();        // persist after every menu commit
 }
 
 // ============================================================
@@ -690,8 +829,19 @@ static void BuildMenu() {
   // long-presses inside the menu to pop back here.
   g_views.Push(&g_playback_view);
 
+  // BuildMenu does a few rounds of sync that we don't want to persist:
+  // the first OnMenuCommit runs before engine.Init populates voice
+  // sequences, and LoadStateLocked may overwrite values. Suppress
+  // SaveStateLocked while this dance happens; turn saves back on at
+  // the end so the next user edit / periodic tick captures everything.
+  g_state_loading = true;
   OnMenuCommit(nullptr);
   g_sequencer.Init();
+  // Restore any persisted state from a previous session.
+  LoadStateLocked();
+  // Re-commit so the engine sees the loaded menu values.
+  OnMenuCommit(nullptr);
+  g_state_loading = false;
 }
 
 // ============================================================
@@ -1554,6 +1704,11 @@ int main() {
 
   std::thread clock_thread(ClockThreadMain);
 
+  // Periodic state-save tick — every 2 seconds, persist sim state.
+  // Covers Sim-window slider changes + live cv/trig mutations that
+  // OnMenuCommit doesn't get fired for.
+  auto last_save = std::chrono::steady_clock::now();
+
   while (!glfwWindowShouldClose(win)) {
     glfwPollEvents();
     ImGui_ImplOpenGL3_NewFrame();
@@ -1607,10 +1762,25 @@ int main() {
     glClear(GL_COLOR_BUFFER_BIT);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     glfwSwapBuffers(win);
+
+    // Periodic save — every 2 s, capture Sim-window changes and live
+    // cv/trig mutations that don't fire OnMenuCommit.
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_save > std::chrono::seconds(2)) {
+      std::lock_guard<std::mutex> lk(g_mutex);
+      SaveStateLocked();
+      last_save = now;
+    }
   }
 
   g_app_quitting.store(true);
   clock_thread.join();
+
+  // Final save before tearing down — covers last-second edits.
+  {
+    std::lock_guard<std::mutex> lk(g_mutex);
+    SaveStateLocked();
+  }
 
   if (audio_ok && audio_stream) {
     Pa_StopStream(audio_stream);

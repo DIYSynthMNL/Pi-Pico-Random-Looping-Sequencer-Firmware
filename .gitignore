@@ -3,3 +3,4 @@ playground
 *.o
 imgui.ini
 .DS_Store
+playground.state

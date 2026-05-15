@@ -36,6 +36,15 @@ void Voice::ClearTriggers() {
   for (int i = 0; i < kMaxSteps; ++i) trigger_sequence_[i] = 1;
 }
 
+void Voice::SetSequences(const uint16_t* cv, const uint8_t* trig) {
+  if (cv) {
+    for (int i = 0; i < kMaxSteps; ++i) cv_sequence_[i] = cv[i];
+  }
+  if (trig) {
+    for (int i = 0; i < kMaxSteps; ++i) trigger_sequence_[i] = trig[i] ? 1 : 0;
+  }
+}
+
 uint16_t Voice::ScaleRoot(const uint16_t* scale, int len) const {
   return (scale && len > 0) ? scale[0] : 0;
 }
