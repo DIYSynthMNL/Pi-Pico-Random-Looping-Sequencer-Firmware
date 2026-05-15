@@ -183,107 +183,234 @@ static void DacToNoteName(uint16_t dac, char* out, int cap) {
 }
 
 // ============================================================
+//  Icons — 6x8 pixel bitmaps drawn directly into the OLED buffer
+// ============================================================
+// Each icon is 6 columns × 8 rows, bit 0 = top row. Same encoding as
+// the FakeOled font glyphs. Drawn by DrawIcon, which respects the
+// `on` flag (so icons over an inverted background render correctly).
+namespace icons {
+
+struct Icon6x8 { uint8_t cols[6]; };
+
+constexpr Icon6x8 kPlay    = {{0xFF, 0x7E, 0x3C, 0x18, 0x00, 0x00}};  // right-pointing triangle
+constexpr Icon6x8 kStop    = {{0x00, 0x7E, 0x7E, 0x7E, 0x7E, 0x00}};  // filled square
+[[maybe_unused]] constexpr Icon6x8 kPause   = {{0x00, 0x7E, 0x7E, 0x00, 0x7E, 0x7E}};
+[[maybe_unused]] constexpr Icon6x8 kNote    = {{0x00, 0x30, 0xFF, 0x00, 0x18, 0x1C}};
+constexpr Icon6x8 kTrig    = {{0xFF, 0x03, 0x03, 0xFF, 0x80, 0x80}};  // pulse shape
+[[maybe_unused]] constexpr Icon6x8 kDice    = {{0x7E, 0x49, 0x65, 0x49, 0x7E, 0x00}};
+[[maybe_unused]] constexpr Icon6x8 kReset   = {{0x3C, 0x42, 0x81, 0x81, 0x42, 0x18}};
+[[maybe_unused]] constexpr Icon6x8 kLoop    = {{0x3C, 0x42, 0x81, 0x91, 0x42, 0x3C}};
+[[maybe_unused]] constexpr Icon6x8 kArrowUp = {{0x08, 0x0C, 0xFE, 0xFE, 0x0C, 0x08}};
+[[maybe_unused]] constexpr Icon6x8 kArrowDn = {{0x10, 0x30, 0x7F, 0x7F, 0x30, 0x10}};
+
+static void Draw(seq::FakeOled& oled, const Icon6x8& icon,
+                 int x, int y, bool on = true) {
+  for (int col = 0; col < 6; ++col) {
+    const uint8_t bits = icon.cols[col];
+    for (int row = 0; row < 8; ++row) {
+      if (bits & (1u << row)) oled.Px(x + col, y + row, on);
+    }
+  }
+}
+
+}  // namespace icons
+
+// ============================================================
 //  PlaybackView — OLED home screen showing the engine in motion
 // ============================================================
 // Sits at the bottom of the view stack. Encoder click pushes the menu
-// list on top of it; long-press inside the menu pops back here.
+// list on top of it; long-press cycles between playback layouts.
 class PlaybackView : public seq::View {
  public:
+  enum class Layout : uint8_t { Grid = 0, PianoRoll = 1, Count = 2 };
+
   void Draw(seq::FakeOled& oled) const override {
-    oled.Clear();
-
-    const int  step  = g_disp_step.load();
-    const int  steps = g_steps_item ? g_steps_item->value() : 16;
-    const bool run   = g_run_item  ? g_run_item->value()    : false;
-    const char* scale = (g_scale_idx >= 0 && g_scale_idx < seq::kNumScales)
-                        ? seq::kScales[g_scale_idx].name : "";
-
-    // ---- Header (y=0..10): status + current note ----
-    char now_note[8];
-    DacToNoteName(g_disp_dac.load(), now_note, sizeof(now_note));
-    char header[24];
-    // Truncate scale to ~7 chars so the line fits 21 glyphs at 6 px each.
-    char scale_short[8];
-    int sl = 0;
-    for (; scale[sl] && sl < 7; ++sl) scale_short[sl] = scale[sl];
-    scale_short[sl] = 0;
-    std::snprintf(header, sizeof(header), "%s %-3s %-7s %02d/%02d",
-                  run ? "P" : "S",   // P=play, S=stop (saves a glyph)
-                  now_note,
-                  scale_short,
-                  step + 1, steps);
-    oled.Text(0, 1, header);
-
-    // ---- Step grid: 8x2 cells, each 16w x 26h ----
-    // Per cell shows: note name (letter + optional accidental, no octave —
-    // wouldn't fit) on top, trig indicator (filled / outlined square)
-    // below. Current step has the whole cell inverted.
-    constexpr int kCellW    = 16;
-    constexpr int kCellH    = 26;
-    constexpr int kGridTop  = 11;
-    constexpr int kRowGap   = 0;
-
-    for (int i = 0; i < seq::kMaxSteps; ++i) {
-      const int col = i % 8;
-      const int row = i / 8;
-      const int x   = col * kCellW;
-      const int y   = kGridTop + row * (kCellH + kRowGap);
-      const bool active = (i < steps);
-      const bool trig   = g_disp_trig_grid[i] != 0;
-      const bool is_cur = (i == step);
-
-      if (!active) {
-        // Inactive (beyond current sequence length) — just a faint
-        // centred dot to acknowledge the slot exists.
-        oled.Px(x + kCellW / 2, y + kCellH / 2, true);
-        continue;
-      }
-
-      if (is_cur) {
-        oled.FillRect(x, y, kCellW, kCellH, true);
-      }
-
-      // Note name (no octave — cells are 16 px wide so "C#" fits but
-      // "C#3" doesn't; octave is in the header for the current step).
-      char note_full[8];
-      DacToNoteName(g_disp_cv[i], note_full, sizeof(note_full));
-      char note_letters[4] = {0};
-      int  nlen = 0;
-      for (int k = 0; note_full[k] && nlen < 3; ++k) {
-        const char c = note_full[k];
-        if (c >= 'A' && c <= 'G') note_letters[nlen++] = c;
-        else if (c == '#')        note_letters[nlen++] = c;
-      }
-      const int note_w = nlen * 6;
-      const int note_x = x + (kCellW - note_w) / 2;
-      oled.Text(note_x, y + 3, note_letters, !is_cur);
-
-      // Trig indicator: 8x8 square centred below the note.
-      const int trig_w = 8;
-      const int trig_x = x + (kCellW - trig_w) / 2;
-      const int trig_y = y + 14;
-      if (trig) {
-        oled.FillRect(trig_x, trig_y, trig_w, trig_w, !is_cur);
-      } else {
-        // Outline only — "step exists but trig off".
-        if (is_cur) {
-          // On inverted background, outline must be drawn in 'off' colour.
-          // The FakeOled doesn't support inverted Rect, so we punch out
-          // a smaller inner rectangle to simulate hollow.
-          oled.FillRect(trig_x + 1, trig_y + 1, trig_w - 2, trig_w - 2, false);
-        } else {
-          oled.Rect(trig_x, trig_y, trig_w, trig_w);
-        }
-      }
+    DrawHeader(oled);
+    switch (layout_) {
+      case Layout::PianoRoll: DrawPianoRoll(oled); break;
+      case Layout::Grid:
+      default:                DrawGrid(oled);      break;
     }
+    DrawLayoutHint(oled);
   }
 
   // Click → enter the menu.
   void OnPress() override {
     if (stack()) stack()->Push(&g_menu_view);
   }
-  // Long-press at the root → no-op (default View::OnLongPress doesn't pop
-  // when depth is 1, so this is implicit).
+
+  // Long-press at the root cycles through playback layouts (instead of
+  // the default View::OnLongPress, which pops the stack — a no-op at
+  // depth 1 anyway).
+  void OnLongPress() override {
+    layout_ = static_cast<Layout>(
+        (static_cast<uint8_t>(layout_) + 1u) %
+        static_cast<uint8_t>(Layout::Count));
+    hint_frames_remaining_ = 60;   // ~1 s at 60 fps
+  }
+
+ private:
+  Layout      layout_                = Layout::Grid;
+  mutable int hint_frames_remaining_ = 0;
+
+  void DrawHeader(seq::FakeOled& oled) const {
+    const int  step  = g_disp_step.load();
+    const int  steps = g_steps_item ? g_steps_item->value() : 16;
+    const bool run   = g_run_item  ? g_run_item->value()    : false;
+    const char* scale = (g_scale_idx >= 0 && g_scale_idx < seq::kNumScales)
+                        ? seq::kScales[g_scale_idx].name : "";
+    char scale_short[8];
+    int sl = 0;
+    for (; scale[sl] && sl < 7; ++sl) scale_short[sl] = scale[sl];
+    scale_short[sl] = 0;
+
+    char now_note[8];
+    DacToNoteName(g_disp_dac.load(), now_note, sizeof(now_note));
+
+    // Play/Stop icon at the far left, then text.
+    icons::Draw(oled, run ? icons::kPlay : icons::kStop, 1, 1);
+    char header[24];
+    std::snprintf(header, sizeof(header), " %-3s %-7s %02d/%02d",
+                  now_note, scale_short, step + 1, steps);
+    oled.Text(8, 1, header);
+
+    // Live trig indicator on the right edge if the gate is high.
+    if (g_disp_trig.load()) {
+      icons::Draw(oled, icons::kTrig, 121, 1);
+    }
+  }
+
+  void DrawLayoutHint(seq::FakeOled& oled) const {
+    if (hint_frames_remaining_ <= 0) return;
+    --hint_frames_remaining_;
+    // Small "n/N" badge at top-right just after a layout switch.
+    const int total = static_cast<int>(Layout::Count);
+    const int idx   = static_cast<int>(layout_) + 1;
+    char b[8];
+    std::snprintf(b, sizeof(b), "%d/%d", idx, total);
+    const int w = static_cast<int>(std::strlen(b)) * 6;
+    oled.FillRect(128 - w - 2, 0, w + 2, 9, true);   // white badge
+    oled.Text   (128 - w - 1, 1, b, false);
+  }
+
+  // ---- Layout 0: 8x2 grid, note letter + trig per cell ----
+  void DrawGrid(seq::FakeOled& oled) const {
+    const int  step  = g_disp_step.load();
+    const int  steps = g_steps_item ? g_steps_item->value() : 16;
+
+    constexpr int kCellW   = 16;
+    constexpr int kCellH   = 26;
+    constexpr int kGridTop = 11;
+
+    for (int i = 0; i < seq::kMaxSteps; ++i) {
+      const int col = i % 8;
+      const int row = i / 8;
+      const int x   = col * kCellW;
+      const int y   = kGridTop + row * kCellH;
+      const bool active = (i < steps);
+      const bool trig   = g_disp_trig_grid[i] != 0;
+      const bool is_cur = (i == step);
+
+      if (!active) {
+        oled.Px(x + kCellW / 2, y + kCellH / 2, true);
+        continue;
+      }
+      if (is_cur) oled.FillRect(x, y, kCellW, kCellH, true);
+
+      char note_full[8];
+      DacToNoteName(g_disp_cv[i], note_full, sizeof(note_full));
+      char note_letters[4] = {0};
+      int  nlen = 0;
+      for (int k = 0; note_full[k] && nlen < 3; ++k) {
+        const char c = note_full[k];
+        if ((c >= 'A' && c <= 'G') || c == '#') note_letters[nlen++] = c;
+      }
+      const int note_w = nlen * 6;
+      const int note_x = x + (kCellW - note_w) / 2;
+      oled.Text(note_x, y + 3, note_letters, !is_cur);
+
+      // Trig icon below the note (centred). Filled icon if trig on,
+      // dim dot if off.
+      const int trig_x = x + (kCellW - 6) / 2;
+      const int trig_y = y + 14;
+      if (trig) {
+        icons::Draw(oled, icons::kTrig, trig_x, trig_y, !is_cur);
+      } else {
+        // single centre dot — "step exists, trig off"
+        oled.Px(trig_x + 3, trig_y + 4, !is_cur);
+      }
+    }
+  }
+
+  // ---- Layout 1: piano roll — pitch contour ----
+  void DrawPianoRoll(seq::FakeOled& oled) const {
+    const int  step  = g_disp_step.load();
+    const int  steps = g_steps_item ? g_steps_item->value() : 16;
+    if (steps <= 0) return;
+
+    // Auto-scale Y to the actual pitch range in the sequence (otherwise
+    // a tight chromatic cluster wastes most of the screen).
+    uint16_t cv_min = 4095, cv_max = 0;
+    for (int i = 0; i < steps; ++i) {
+      if (g_disp_cv[i] < cv_min) cv_min = g_disp_cv[i];
+      if (g_disp_cv[i] > cv_max) cv_max = g_disp_cv[i];
+    }
+    if (cv_max <= cv_min) cv_max = cv_min + 1;
+
+    constexpr int kGraphTop = 12;
+    constexpr int kGraphBot = 48;
+    constexpr int kGraphH   = kGraphBot - kGraphTop;
+    constexpr int kTrigY    = 52;
+    constexpr int kTrigSize = 6;
+
+    const int step_w = 128 / steps;
+    auto x_for = [&](int i) { return i * step_w + step_w / 2; };
+    auto y_for = [&](uint16_t cv) {
+      return kGraphBot -
+             static_cast<int>((static_cast<int32_t>(cv - cv_min) * kGraphH) /
+                              (cv_max - cv_min));
+    };
+
+    // Current-step vertical playhead (dashed)
+    const int cx = x_for(step);
+    for (int y = kGraphTop; y < kTrigY + kTrigSize; y += 2) oled.Px(cx, y, true);
+
+    // Pitch contour line — connect consecutive steps.
+    for (int i = 0; i < steps; ++i) {
+      const int x = x_for(i);
+      const int y = y_for(g_disp_cv[i]);
+      if (i > 0) {
+        const int px = x_for(i - 1);
+        const int py = y_for(g_disp_cv[i - 1]);
+        oled.Line(px, py, x, y);
+      }
+      // Step dot (filled square at the point)
+      oled.FillRect(x - 1, y - 1, 3, 3, true);
+    }
+
+    // Trig row beneath the graph
+    for (int i = 0; i < steps; ++i) {
+      const int x = i * step_w + (step_w - kTrigSize) / 2;
+      const bool is_cur = (i == step);
+      if (g_disp_trig_grid[i]) {
+        oled.FillRect(x, kTrigY, kTrigSize, kTrigSize, true);
+        if (is_cur) {
+          // Punch out a dot so the current trig reads "selected".
+          oled.Px(x + kTrigSize / 2, kTrigY + kTrigSize / 2, false);
+        }
+      } else {
+        oled.Rect(x, kTrigY, kTrigSize, kTrigSize);
+      }
+    }
+
+    // Min/Max note labels on the right edge so you know the range.
+    char nmin[8], nmax[8];
+    DacToNoteName(cv_min, nmin, sizeof(nmin));
+    DacToNoteName(cv_max, nmax, sizeof(nmax));
+    // (omitted — limited horizontal space; piano roll's strength is
+    // the contour itself, and the header already shows the current note.)
+    (void)nmin; (void)nmax;
+  }
 };
 
 PlaybackView g_playback_view;
