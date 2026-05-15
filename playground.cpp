@@ -98,8 +98,8 @@ seq::NumericalItem*       g_steps_item        = nullptr;
 seq::NumericalItem*       g_octaves_item      = nullptr;
 seq::NumericalItem*       g_start_note_item   = nullptr;
 seq::NumericalItem*       g_clk_div_item      = nullptr;  // audit 2d
-seq::ToggleItem*          g_cv_erase_item     = nullptr;
-seq::ToggleItem*          g_trig_erase_item   = nullptr;
+seq::ActionItem*          g_clear_cv_item     = nullptr;  // audit 2a
+seq::ActionItem*          g_clear_trig_item   = nullptr;  // audit 2a
 seq::ToggleItem*          g_run_item          = nullptr;  // audit 2f
 seq::SingleSelectItem*    g_cv_source_item    = nullptr;
 seq::SingleSelectItem*    g_dig_in_item       = nullptr;  // audit 2e
@@ -125,6 +125,19 @@ static void RebuildScale_locked() {
 }
 
 // ============================================================
+//  One-shot actions (audit 2a)
+// ============================================================
+// Called by the corresponding ActionItem when pressed in the menu. The
+// caller already holds g_mutex (the menu OnPress path runs under lock),
+// so these touch engine state directly.
+static void ActionClearCv(void* /*user*/) {
+  g_sequencer.voice(0).ClearCv(g_scale, g_scale_count);
+}
+static void ActionClearTriggers(void* /*user*/) {
+  g_sequencer.voice(0).ClearTriggers();
+}
+
+// ============================================================
 //  Menu commit callback — sync menu items into engine params
 // ============================================================
 static void OnMenuCommit(void* /*user*/) {
@@ -136,8 +149,6 @@ static void OnMenuCommit(void* /*user*/) {
   g_octaves                    = g_octaves_item->value();
   g_starting_note              = g_start_note_item->value();
   g_vparams.clock_divider      = g_clk_div_item->value();
-  g_vparams.is_cv_erase        = g_cv_erase_item->value();
-  g_vparams.is_trig_erase      = g_trig_erase_item->value();
   g_vparams.cv_source          = static_cast<seq::CvSource>(
       g_cv_source_item->selected_index());
 
@@ -174,21 +185,21 @@ static void BuildMenu() {
                                                seq::kMaxOctaves, 1);
   g_start_note_item   = new seq::NumericalItem("Start note",0,  0, 36, 1);
   g_clk_div_item      = new seq::NumericalItem("ClkDiv",   1,  1, 16, 1);
-  g_cv_erase_item     = new seq::ToggleItem("CvErase",   false);
-  g_trig_erase_item   = new seq::ToggleItem("TrigErase", false);
+  g_clear_cv_item     = new seq::ActionItem("Clear CV",   &ActionClearCv,       nullptr);
+  g_clear_trig_item   = new seq::ActionItem("Clear Trig", &ActionClearTriggers, nullptr);
   g_cv_source_item    = new seq::SingleSelectItem(
       "CV Source", kCvSourceNames, kCvSourceCount, 0);
   g_dig_in_item       = new seq::SingleSelectItem(
       "DigIn", kDigInModeNames, kDigInModeCount,
       static_cast<int>(seq::DigitalInMode::Reset));
 
-  // Order: transport-y stuff first, then params, then modes.
+  // Order: transport-y stuff first, then params, then modes/actions.
   g_items = {
     g_run_item, g_scale_item,
     g_cv_prob_item, g_trig_prob_item, g_trig_length_item,
     g_steps_item, g_octaves_item, g_start_note_item, g_clk_div_item,
-    g_cv_erase_item, g_trig_erase_item,
     g_cv_source_item, g_dig_in_item,
+    g_clear_cv_item, g_clear_trig_item,
   };
 
   g_root_view.SetTitle("Main Menu");
@@ -327,7 +338,7 @@ static void RenderControlsWindow() {
   ImGui::SeparatorText("Direct param edit (syncs to menu)");
   bool changed = false;
   int  cv_prob, trig_prob, trig_len, steps, octs, start_note, clk_div;
-  bool cv_erase, trig_erase, run;
+  bool run;
   int  cv_source_idx, dig_in_idx, scale_idx;
   {
     std::lock_guard<std::mutex> lk(g_mutex);
@@ -339,8 +350,6 @@ static void RenderControlsWindow() {
     octs          = g_octaves_item->value();
     start_note    = g_start_note_item->value();
     clk_div       = g_clk_div_item->value();
-    cv_erase      = g_cv_erase_item->value();
-    trig_erase    = g_trig_erase_item->value();
     cv_source_idx = g_cv_source_item->selected_index();
     dig_in_idx    = g_dig_in_item->selected_index();
     scale_idx     = g_scale_item->selected_index();
@@ -364,8 +373,16 @@ static void RenderControlsWindow() {
   changed |= ImGui::SliderInt("CV change %",   &cv_prob,    0, 100);
   changed |= ImGui::SliderInt("Trig change %", &trig_prob,  0, 100);
   changed |= ImGui::SliderInt("Trig length %", &trig_len,   0, 100);
-  changed |= ImGui::Checkbox ("CV erase",      &cv_erase);
-  changed |= ImGui::Checkbox ("Trig erase",    &trig_erase);
+  // One-shot actions (replace the v0.3 destructive toggles)
+  if (ImGui::Button("Clear CV (action)")) {
+    std::lock_guard<std::mutex> lk(g_mutex);
+    ActionClearCv(nullptr);
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Clear Trig (action)")) {
+    std::lock_guard<std::mutex> lk(g_mutex);
+    ActionClearTriggers(nullptr);
+  }
   if (ImGui::BeginCombo("CV source", kCvSourceNames[cv_source_idx])) {
     for (int i = 0; i < kCvSourceCount; ++i) {
       bool sel = (i == cv_source_idx);
@@ -402,8 +419,6 @@ static void RenderControlsWindow() {
     g_octaves_item->set_value(octs);
     g_start_note_item->set_value(start_note);
     g_clk_div_item->set_value(clk_div);
-    g_cv_erase_item->set_value(cv_erase);
-    g_trig_erase_item->set_value(trig_erase);
     g_cv_source_item->set_selected_index(cv_source_idx);
     g_dig_in_item->set_selected_index(dig_in_idx);
     OnMenuCommit(nullptr);
@@ -443,6 +458,48 @@ static void RenderControlsWindow() {
   }
   ImGui::Dummy(ImVec2(8 * (cell + gap), 2 * (cell + gap) + 6));
 
+  // Audit 3.x: CV-per-step bar chart. Each bar height = cv_sequence[i] /
+  // 4095 of the max. Visible at a glance what notes the engine is emitting
+  // per step, so you don't have to read DAC numbers and translate.
+  ImGui::SeparatorText("CV per step");
+  ImVec2 bar_p0 = ImGui::GetCursorScreenPos();
+  const float bar_w     = 12.0f;
+  const float bar_gap   = 2.0f;
+  const float bar_max_h = 40.0f;
+  for (int i = 0; i < seq::kMaxSteps; ++i) {
+    const float x  = bar_p0.x + i * (bar_w + bar_gap);
+    const float frac = static_cast<float>(g_disp_cv[i]) / 4095.0f;
+    const float bh = bar_max_h * (frac < 0.0f ? 0.0f : (frac > 1.0f ? 1.0f : frac));
+    const ImVec2 a(x, bar_p0.y + (bar_max_h - bh));
+    const ImVec2 b(x + bar_w, bar_p0.y + bar_max_h);
+    const bool   is_cur = (i == step);
+    const bool   active = (i < steps);
+    ImU32 fill_col = active ? (is_cur ? IM_COL32(255, 200, 80, 255)
+                                      : IM_COL32(120, 160, 220, 255))
+                            : IM_COL32(60, 60, 60, 255);
+    dl->AddRectFilled(a, b, fill_col);
+    dl->AddRect(ImVec2(x, bar_p0.y),
+                ImVec2(x + bar_w, bar_p0.y + bar_max_h),
+                IM_COL32(80, 80, 80, 255));
+  }
+  ImGui::Dummy(ImVec2(seq::kMaxSteps * (bar_w + bar_gap), bar_max_h + 6));
+
+  // Audit 3.x: active scale notes (the DAC values the engine is choosing
+  // from). Useful to verify "is C major actually selecting C, D, E, F, …?"
+  // and to spot a misconfigured starting_note + octave combination.
+  ImGui::SeparatorText("Active scale notes (12-bit DAC)");
+  {
+    std::lock_guard<std::mutex> lk(g_mutex);
+    char buf[256];
+    int  w = 0;
+    for (int i = 0; i < g_scale_count && w < (int)sizeof(buf) - 8; ++i) {
+      w += std::snprintf(buf + w, sizeof(buf) - w,
+                         (i == 0) ? "%u" : ", %u",
+                         static_cast<unsigned>(g_scale[i]));
+    }
+    ImGui::TextWrapped("%s", buf);
+  }
+
   ImGui::End();
 }
 
@@ -472,6 +529,18 @@ static void OnKey(GLFWwindow* win, int key, int /*sc*/, int action, int /*mods*/
       if (action == GLFW_PRESS) {
         std::lock_guard<std::mutex> lk(g_mutex);
         g_views.OnLongPress();
+      }
+      break;
+    // Number keys 1-9: jump directly to that submenu, but only when the
+    // root list is on top (avoids weird jumps from inside an editor).
+    case GLFW_KEY_1: case GLFW_KEY_2: case GLFW_KEY_3:
+    case GLFW_KEY_4: case GLFW_KEY_5: case GLFW_KEY_6:
+    case GLFW_KEY_7: case GLFW_KEY_8: case GLFW_KEY_9:
+      if (action == GLFW_PRESS) {
+        std::lock_guard<std::mutex> lk(g_mutex);
+        if (g_views.depth() == 1) {
+          g_root_view.JumpTo(key - GLFW_KEY_1);
+        }
       }
       break;
     case GLFW_KEY_G:
@@ -553,7 +622,7 @@ int main() {
   delete g_trig_prob_item;   delete g_trig_length_item;
   delete g_steps_item;       delete g_octaves_item;
   delete g_start_note_item;  delete g_clk_div_item;
-  delete g_cv_erase_item;    delete g_trig_erase_item;
+  delete g_clear_cv_item;    delete g_clear_trig_item;
   delete g_run_item;         delete g_cv_source_item;
   delete g_dig_in_item;
   return 0;

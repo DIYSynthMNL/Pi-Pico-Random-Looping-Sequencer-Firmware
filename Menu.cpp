@@ -55,13 +55,26 @@ void MenuListView::OnRotate(int delta) {
   if (menu_start_idx_ < 0) menu_start_idx_ = 0;
 }
 
+void MenuListView::JumpTo(int index) {
+  if (!items_ || index < 0 || index >= count_) return;
+  highlighted_ = index;
+  if (highlighted_ > menu_start_idx_ + (total_lines_ - 1))
+    menu_start_idx_ = highlighted_ - (total_lines_ - 1);
+  if (highlighted_ < menu_start_idx_)
+    menu_start_idx_ = highlighted_;
+  if (menu_start_idx_ < 0) menu_start_idx_ = 0;
+}
+
 void MenuListView::OnPress() {
   if (!items_ || highlighted_ < 0 || highlighted_ >= count_) return;
   View* editor = items_[highlighted_]->OnPressInList(*stack(), *this);
   if (editor) {
     stack()->Push(editor);
   } else {
-    // Inline action (e.g. toggle) — fire commit now so host syncs params.
+    // Inline action (toggle or action item) — flash the row to acknowledge
+    // the press, then fire the commit so the host syncs params.
+    flash_index_            = highlighted_;
+    flash_frames_remaining_ = kFlashFrames;
     NotifyCommit();
   }
 }
@@ -79,13 +92,20 @@ void MenuListView::Draw(FakeOled& oled) const {
     char line[24];
     items_[item_index]->Repr(line, sizeof(line));
 
-    if (item_index == highlighted_) {
+    // Highlight inversion is briefly turned OFF while a row is flashing,
+    // so the press creates a visible "blink" before returning to normal.
+    const bool is_highlighted = (item_index == highlighted_);
+    const bool is_flashing    = (item_index == flash_index_ &&
+                                 flash_frames_remaining_ > 0);
+    const bool invert         = is_highlighted && !is_flashing;
+    if (invert) {
       oled.FillRect(0, y - 1, 128, kLineHeight, true);
       oled.Text(0, y, line, false);
     } else {
       oled.Text(0, y, line, true);
     }
   }
+  if (flash_frames_remaining_ > 0) --flash_frames_remaining_;
 }
 
 // ============================================================
@@ -108,6 +128,20 @@ void NumericalItem::Repr(char* out, int cap) const {
   std::snprintf(out, cap, "%s:%d", name_, value_);
 }
 
+// ============================================================
+//  ActionItem
+// ============================================================
+void ActionItem::Repr(char* out, int cap) const {
+  // No "Name:value" — actions don't carry persistent state. Just the name.
+  std::snprintf(out, cap, "%s", name_);
+}
+
+View* ActionItem::OnPressInList(ViewStack& /*stack*/,
+                                MenuListView& /*list*/) {
+  if (action_) action_(user_);
+  return nullptr;
+}
+
 View* NumericalItem::OnPressInList(ViewStack& /*stack*/,
                                    MenuListView& list) {
   // Hand off ownership to the stack — ViewStack does not delete views
@@ -119,17 +153,36 @@ View* NumericalItem::OnPressInList(ViewStack& /*stack*/,
 //  SingleSelectItem
 // ============================================================
 void SingleSelectItem::Repr(char* out, int cap) const {
-  // Phase A: simple truncate-to-fit (line is 16 chars wide at 6x8).
-  // Phase B (audit 3a) replaces this with ellipsis truncation.
-  char buf[24];
-  std::snprintf(buf, sizeof(buf), "%s:%s", name_, options_[selected_]);
-  // Cap to 16 chars so it fits the OLED width without wrapping garbage.
-  const int max_len = 20;
-  int  len = static_cast<int>(std::strlen(buf));
-  if (len > max_len) len = max_len;
-  if (len >= cap)    len = cap - 1;
-  std::memcpy(out, buf, len);
-  out[len] = 0;
+  // 6x8 font, 128 px wide OLED → 21 glyph columns. Cap to 20 chars to
+  // keep a 1-glyph right margin. Truncate the *value* with "..." rather
+  // than chopping characters mid-name (the old vowel-strip from main.py
+  // produced unreadable results like "ctntnc c-c#"). Audit 3a.
+  constexpr int kMaxChars = 20;
+  const int prefix_n = std::snprintf(out, cap, "%s:", name_);
+  if (prefix_n < 0 || prefix_n >= cap) return;
+
+  const char* value = options_[selected_];
+  const int   value_len = static_cast<int>(std::strlen(value));
+  const int   remaining = kMaxChars - prefix_n;
+
+  if (value_len <= remaining) {
+    std::snprintf(out + prefix_n, cap - prefix_n, "%s", value);
+    return;
+  }
+  // Truncate with "..." (three ASCII dots — visible in our 6x8 font).
+  if (remaining > 3 && remaining < cap - prefix_n) {
+    const int copy_n = remaining - 3;
+    std::memcpy(out + prefix_n, value, copy_n);
+    out[prefix_n + copy_n + 0] = '.';
+    out[prefix_n + copy_n + 1] = '.';
+    out[prefix_n + copy_n + 2] = '.';
+    out[prefix_n + copy_n + 3] = 0;
+  } else {
+    // Vanishingly small budget — just hard-truncate.
+    const int n = (remaining < cap - prefix_n) ? remaining : (cap - prefix_n - 1);
+    std::memcpy(out + prefix_n, value, n);
+    out[prefix_n + n] = 0;
+  }
 }
 
 View* SingleSelectItem::OnPressInList(ViewStack& /*stack*/,

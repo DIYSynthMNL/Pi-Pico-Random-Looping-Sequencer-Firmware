@@ -111,6 +111,15 @@ class MenuListView : public View {
   int item_count()         const { return count_; }
   MenuItem* item(int i)    const { return items_ ? items_[i] : nullptr; }
 
+  // Direct jump to a specific item index. Used by the sim's number-key
+  // shortcut (1..9). Adjusts scroll window so the target is visible.
+  void JumpTo(int index);
+
+  // Audit 3c: brief inverse-flash on a row after an inline-action press
+  // (toggle or action item). MenuListView::OnPress sets these automatically
+  // when an item's OnPressInList returns nullptr.
+  static constexpr int kFlashFrames = 8;   // ~135 ms at 60Hz
+
  private:
   const char*       title_           = "Menu";
   MenuItem* const*  items_           = nullptr;
@@ -120,6 +129,9 @@ class MenuListView : public View {
   int               total_lines_     = 4;
   CommitCallback    commit_cb_       = nullptr;
   void*             commit_user_     = nullptr;
+  // Flash state — set by OnPress, decremented in Draw.
+  int               flash_index_                = -1;
+  mutable int       flash_frames_remaining_     = 0;
 };
 
 // ============================================================
@@ -157,6 +169,23 @@ class NumericalItem : public MenuItem {
  private:
   const char* name_;
   int value_, min_, max_, step_;
+};
+
+// One-shot action — fires a callback immediately on press, no editor pushed.
+// Used for "Clear CV" / "Clear Trig" etc. (audit 2a) where the user wants
+// a single irreversible side-effect, not an ongoing mode toggle.
+class ActionItem : public MenuItem {
+ public:
+  typedef void (*Action)(void* user);
+  ActionItem(const char* name, Action action, void* user)
+      : name_(name), action_(action), user_(user) {}
+  const char* name() const override { return name_; }
+  void  Repr(char* out, int cap) const override;
+  View* OnPressInList(ViewStack& stack, MenuListView& list) override;
+ private:
+  const char* name_;
+  Action      action_;
+  void*       user_;
 };
 
 class SingleSelectItem : public MenuItem {

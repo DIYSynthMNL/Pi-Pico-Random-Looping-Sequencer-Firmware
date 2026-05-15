@@ -27,6 +27,15 @@ void Voice::Reset() {
   last_played_step_ = 0;
 }
 
+void Voice::ClearCv(const uint16_t* scale, int scale_length) {
+  const uint16_t root = ScaleRoot(scale, scale_length);
+  for (int i = 0; i < kMaxSteps; ++i) cv_sequence_[i] = root;
+}
+
+void Voice::ClearTriggers() {
+  for (int i = 0; i < kMaxSteps; ++i) trigger_sequence_[i] = 1;
+}
+
 uint16_t Voice::ScaleRoot(const uint16_t* scale, int len) const {
   return (scale && len > 0) ? scale[0] : 0;
 }
@@ -78,13 +87,6 @@ bool Voice::Advance(uint32_t now_ms, uint32_t gate_ms,
   RebuildTestSequenceIfNeeded(scale, scale_length);
   RandomlyChangeCurrentStepCv(scale, scale_length);
   RandomlyChangeCurrentStepTrigger();
-
-  if (params_.is_cv_erase) {
-    cv_sequence_[next_step_] = ScaleRoot(scale, scale_length);
-  }
-  if (params_.is_trig_erase) {
-    trigger_sequence_[next_step_] = 1;
-  }
 
   switch (params_.cv_source) {
     case CvSource::Test:

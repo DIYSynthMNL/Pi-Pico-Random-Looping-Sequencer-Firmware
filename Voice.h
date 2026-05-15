@@ -55,8 +55,6 @@ struct VoiceParams {
   // VoiceParams shape.
   int  clock_divider      = 1;
 
-  bool is_cv_erase        = false;
-  bool is_trig_erase      = false;
   CvSource cv_source      = CvSource::Normal;
 };
 
@@ -65,6 +63,13 @@ class Voice {
   void Init();
   // Reset the playhead to step 0 without clearing the sequences themselves.
   void Reset();
+
+  // One-shot clears, replacing the v0.2 destructive "erase" toggles.
+  // ClearCv() forces every CV step to the supplied scale's root note.
+  // ClearTriggers() forces every trigger to ON.
+  // Called by the host (or a menu ActionItem) when the user asks.
+  void ClearCv(const uint16_t* scale, int scale_length);
+  void ClearTriggers();
 
   void SetParams(const VoiceParams& p) { params_ = p; }
   void Seed(uint64_t s) { rng_.seed(static_cast<uint32_t>(s)); }
