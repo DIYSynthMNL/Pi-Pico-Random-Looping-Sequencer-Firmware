@@ -738,46 +738,107 @@ static void RenderControlsWindow() {
 }
 
 // ============================================================
+//  Input action helpers — shared by keyboard handler and the
+//  "Encoder & Inputs" ImGui window's clickable buttons.
+// ============================================================
+static void DoEncoderRotate(int delta) {
+  std::lock_guard<std::mutex> lk(g_mutex);
+  g_views.OnRotate(delta);
+}
+static void DoEncoderPress() {
+  std::lock_guard<std::mutex> lk(g_mutex);
+  g_views.OnPress();
+}
+static void DoEncoderLongPress() {
+  std::lock_guard<std::mutex> lk(g_mutex);
+  g_views.OnLongPress();
+}
+static void DoMenuJump(int index) {
+  std::lock_guard<std::mutex> lk(g_mutex);
+  if (g_views.top() == &g_menu_view) g_menu_view.JumpTo(index);
+}
+
+// ============================================================
+//  Encoder & Inputs window — clickable mirror of the keyboard
+// ============================================================
+static void RenderEncoderInputsWindow() {
+  ImGui::Begin("Encoder & Inputs");
+
+  // ---- Encoder ----
+  ImGui::SeparatorText("Encoder");
+  if (ImGui::Button("<<  rotate left",  ImVec2(140, 0))) DoEncoderRotate(-1);
+  ImGui::SameLine();
+  if (ImGui::Button("CLICK",            ImVec2(80, 0)))  DoEncoderPress();
+  ImGui::SameLine();
+  if (ImGui::Button("rotate right  >>", ImVec2(140, 0))) DoEncoderRotate(+1);
+  if (ImGui::Button("LONG PRESS (back / cancel)", ImVec2(0, 0))) DoEncoderLongPress();
+
+  // ---- Transport / inputs ----
+  ImGui::SeparatorText("Transport & jacks");
+  bool running = g_clock_running.load();
+  if (ImGui::Checkbox("Internal clock running", &running)) g_clock_running.store(running);
+  int bpm = g_bpm.load();
+  if (ImGui::SliderInt("BPM", &bpm, 20, 240)) g_bpm.store(bpm);
+
+  if (ImGui::Button("Manual clock pulse"))  g_manual_pulse_request.store(true);
+  ImGui::SameLine();
+  if (ImGui::Button("Digital-in pulse"))    g_digital_pulse_request.store(true);
+  ImGui::SameLine();
+  if (ImGui::Button("RESET"))               g_reset_request.store(true);
+
+  // ---- Menu jumps (1..9) ----
+  ImGui::SeparatorText("Menu shortcuts (only when menu is on top)");
+  const bool in_menu = (g_views.top() == &g_menu_view);
+  if (!in_menu) ImGui::BeginDisabled();
+  for (int i = 1; i <= 9; ++i) {
+    char lbl[3] = { static_cast<char>('0' + i), 0, 0 };
+    if (i > 1) ImGui::SameLine();
+    if (ImGui::Button(lbl, ImVec2(28, 0))) DoMenuJump(i - 1);
+  }
+  if (!in_menu) ImGui::EndDisabled();
+
+  // ---- Keyboard reference ----
+  ImGui::SeparatorText("Keyboard reference");
+  ImGui::BeginTable("keys", 2, ImGuiTableFlags_SizingFixedFit);
+  auto row = [](const char* k, const char* v) {
+    ImGui::TableNextRow();
+    ImGui::TableNextColumn(); ImGui::TextColored(ImVec4(0.8f, 0.9f, 1.0f, 1.0f), "%s", k);
+    ImGui::TableNextColumn(); ImGui::Text("%s", v);
+  };
+  row("Left / Right", "Encoder rotate");
+  row("Space",        "Encoder click");
+  row("Backspace",    "Long-press / cancel / back");
+  row("G",            "Manual clock pulse");
+  row("D",            "Digital-in pulse");
+  row("S",            "Toggle internal clock");
+  row("R",            "Reset transport");
+  row("1 .. 9",       "Jump to menu item N");
+  row("Esc / Q",      "Quit");
+  ImGui::EndTable();
+
+  ImGui::End();
+}
+
+// ============================================================
 //  Keyboard
 // ============================================================
 static void OnKey(GLFWwindow* win, int key, int /*sc*/, int action, int /*mods*/) {
   if (action != GLFW_PRESS && action != GLFW_REPEAT) return;
   switch (key) {
-    case GLFW_KEY_LEFT: {
-      std::lock_guard<std::mutex> lk(g_mutex);
-      g_views.OnRotate(-1);
-      break;
-    }
-    case GLFW_KEY_RIGHT: {
-      std::lock_guard<std::mutex> lk(g_mutex);
-      g_views.OnRotate(+1);
-      break;
-    }
+    case GLFW_KEY_LEFT:  DoEncoderRotate(-1); break;
+    case GLFW_KEY_RIGHT: DoEncoderRotate(+1); break;
     case GLFW_KEY_SPACE:
-      if (action == GLFW_PRESS) {
-        std::lock_guard<std::mutex> lk(g_mutex);
-        g_views.OnPress();
-      }
+      if (action == GLFW_PRESS) DoEncoderPress();
       break;
     case GLFW_KEY_BACKSPACE:
-      if (action == GLFW_PRESS) {
-        std::lock_guard<std::mutex> lk(g_mutex);
-        g_views.OnLongPress();
-      }
+      if (action == GLFW_PRESS) DoEncoderLongPress();
       break;
     // Number keys 1-9: jump directly to that submenu, but only when the
     // root list is on top (avoids weird jumps from inside an editor).
     case GLFW_KEY_1: case GLFW_KEY_2: case GLFW_KEY_3:
     case GLFW_KEY_4: case GLFW_KEY_5: case GLFW_KEY_6:
     case GLFW_KEY_7: case GLFW_KEY_8: case GLFW_KEY_9:
-      if (action == GLFW_PRESS) {
-        std::lock_guard<std::mutex> lk(g_mutex);
-        // Number-keys jump only when the menu list is on top — not from
-        // the PlaybackView home screen, and not from inside an editor.
-        if (g_views.top() == &g_menu_view) {
-          g_menu_view.JumpTo(key - GLFW_KEY_1);
-        }
-      }
+      if (action == GLFW_PRESS) DoMenuJump(key - GLFW_KEY_1);
       break;
     case GLFW_KEY_G:
       if (action == GLFW_PRESS) g_manual_pulse_request.store(true);
@@ -924,6 +985,7 @@ int main() {
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
     RenderOledWidget();
+    RenderEncoderInputsWindow();
     RenderControlsWindow();
     ImGui::Render();
 
