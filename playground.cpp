@@ -397,7 +397,7 @@ class PlaybackView : public seq::View {
 
   // Rolling CV history for the Scope layout. Sampled once per step
   // change. Newest at scope_head_; we render right-to-left from there.
-  static constexpr int kScopeLen = 64;
+  static constexpr int kScopeLen = 32;
   mutable uint16_t scope_cv_[kScopeLen]   = {0};
   mutable uint8_t  scope_trig_[kScopeLen] = {0};
   mutable int      scope_head_            = 0;
@@ -702,20 +702,23 @@ class PlaybackView : public seq::View {
           (static_cast<int32_t>(cv - lo) * kH) / (hi - lo));
     };
     // Plot newest at x=127, walking left. Connect consecutive samples.
+    // 4 px per sample × 32 samples = 128 px wide. Bigger stride than
+    // earlier 2×64 — the contour reads as steps instead of a dense
+    // zigzag, and trig ticks are clearly spaced.
     int prev_x = -1, prev_y = -1;
-    const int x_step = 2;   // 2 px per sample → 64 samples = 128 px
+    const int x_step = 4;
     for (int n = 0; n < scope_filled_; ++n) {
       const int idx = (scope_head_ - 1 - n + kScopeLen) % kScopeLen;
       const int x   = 127 - n * x_step;
       if (x < 0) break;
       const int y = y_for(scope_cv_[idx]);
       if (prev_x >= 0) oled.Line(x, y, prev_x, prev_y);
-      oled.FillRect(x - 1, y - 1, 2, 2, true);
+      // Larger dot (3×3) since samples are sparser.
+      oled.FillRect(x - 1, y - 1, 3, 3, true);
       if (scope_trig_[idx]) {
-        oled.Px(x,     kTickY,     true);
-        oled.Px(x,     kTickY + 1, true);
-        oled.Px(x - 1, kTickY + 1, true);
-        oled.Px(x + 1, kTickY + 1, true);
+        // Wider tick mark to match the new sample spacing.
+        oled.FillRect(x - 1, kTickY,     3, 1, true);
+        oled.FillRect(x - 2, kTickY + 1, 5, 1, true);
       }
       prev_x = x; prev_y = y;
     }
