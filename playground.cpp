@@ -192,62 +192,90 @@ class PlaybackView : public seq::View {
   void Draw(seq::FakeOled& oled) const override {
     oled.Clear();
 
-    // Header: PLAY/STOP, scale (truncated), step n/total
     const int  step  = g_disp_step.load();
     const int  steps = g_steps_item ? g_steps_item->value() : 16;
     const bool run   = g_run_item  ? g_run_item->value()    : false;
     const char* scale = (g_scale_idx >= 0 && g_scale_idx < seq::kNumScales)
                         ? seq::kScales[g_scale_idx].name : "";
+
+    // ---- Header (y=0..10): status + current note ----
+    char now_note[8];
+    DacToNoteName(g_disp_dac.load(), now_note, sizeof(now_note));
+    char header[24];
+    // Truncate scale to ~7 chars so the line fits 21 glyphs at 6 px each.
     char scale_short[8];
     int sl = 0;
     for (; scale[sl] && sl < 7; ++sl) scale_short[sl] = scale[sl];
     scale_short[sl] = 0;
+    std::snprintf(header, sizeof(header), "%s %-3s %-7s %02d/%02d",
+                  run ? "P" : "S",   // P=play, S=stop (saves a glyph)
+                  now_note,
+                  scale_short,
+                  step + 1, steps);
+    oled.Text(0, 1, header);
 
-    char header[24];
-    std::snprintf(header, sizeof(header), "%s %s %02d/%02d",
-                  run ? "PLAY" : "STOP",
-                  scale_short, step + 1, steps);
-    oled.Text(2, 2, header);
-    oled.Rect(0, 0, 128, 12);
+    // ---- Step grid: 8x2 cells, each 16w x 26h ----
+    // Per cell shows: note name (letter + optional accidental, no octave —
+    // wouldn't fit) on top, trig indicator (filled / outlined square)
+    // below. Current step has the whole cell inverted.
+    constexpr int kCellW    = 16;
+    constexpr int kCellH    = 26;
+    constexpr int kGridTop  = 11;
+    constexpr int kRowGap   = 0;
 
-    // Step grid — 8 cells per row, 2 rows.
-    constexpr int kTopY  = 16;
-    constexpr int kCellW = 14;
-    constexpr int kCellH = 14;
-    constexpr int kGapX  = 2;
-    constexpr int kGapY  = 2;
     for (int i = 0; i < seq::kMaxSteps; ++i) {
       const int col = i % 8;
       const int row = i / 8;
-      const int x   = col * (kCellW + kGapX);
-      const int y   = kTopY + row * (kCellH + kGapY);
+      const int x   = col * kCellW;
+      const int y   = kGridTop + row * (kCellH + kRowGap);
       const bool active = (i < steps);
       const bool trig   = g_disp_trig_grid[i] != 0;
       const bool is_cur = (i == step);
+
       if (!active) {
-        oled.Px(x + kCellW / 2, y + kCellH / 2, true);   // dim dot
-      } else if (is_cur) {
-        oled.FillRect(x, y, kCellW, kCellH);             // filled = now playing
-      } else if (trig) {
-        oled.Rect(x, y, kCellW, kCellH);                 // outlined = trig on
+        // Inactive (beyond current sequence length) — just a faint
+        // centred dot to acknowledge the slot exists.
+        oled.Px(x + kCellW / 2, y + kCellH / 2, true);
+        continue;
+      }
+
+      if (is_cur) {
+        oled.FillRect(x, y, kCellW, kCellH, true);
+      }
+
+      // Note name (no octave — cells are 16 px wide so "C#" fits but
+      // "C#3" doesn't; octave is in the header for the current step).
+      char note_full[8];
+      DacToNoteName(g_disp_cv[i], note_full, sizeof(note_full));
+      char note_letters[4] = {0};
+      int  nlen = 0;
+      for (int k = 0; note_full[k] && nlen < 3; ++k) {
+        const char c = note_full[k];
+        if (c >= 'A' && c <= 'G') note_letters[nlen++] = c;
+        else if (c == '#')        note_letters[nlen++] = c;
+      }
+      const int note_w = nlen * 6;
+      const int note_x = x + (kCellW - note_w) / 2;
+      oled.Text(note_x, y + 3, note_letters, !is_cur);
+
+      // Trig indicator: 8x8 square centred below the note.
+      const int trig_w = 8;
+      const int trig_x = x + (kCellW - trig_w) / 2;
+      const int trig_y = y + 14;
+      if (trig) {
+        oled.FillRect(trig_x, trig_y, trig_w, trig_w, !is_cur);
       } else {
-        // four corners (a "trig off" tag)
-        oled.Px(x, y, true);
-        oled.Px(x + kCellW - 1, y, true);
-        oled.Px(x, y + kCellH - 1, true);
-        oled.Px(x + kCellW - 1, y + kCellH - 1, true);
+        // Outline only — "step exists but trig off".
+        if (is_cur) {
+          // On inverted background, outline must be drawn in 'off' colour.
+          // The FakeOled doesn't support inverted Rect, so we punch out
+          // a smaller inner rectangle to simulate hollow.
+          oled.FillRect(trig_x + 1, trig_y + 1, trig_w - 2, trig_w - 2, false);
+        } else {
+          oled.Rect(trig_x, trig_y, trig_w, trig_w);
+        }
       }
     }
-
-    // Footer: current note name + DAC value + trig indicator
-    char note[8];
-    DacToNoteName(g_disp_dac.load(), note, sizeof(note));
-    char footer[28];
-    std::snprintf(footer, sizeof(footer), "%-4s %4u %s",
-                  note,
-                  static_cast<unsigned>(g_disp_dac.load()),
-                  g_disp_trig.load() ? "TRIG" : "    ");
-    oled.Text(2, 53, footer);
   }
 
   // Click → enter the menu.
