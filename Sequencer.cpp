@@ -34,12 +34,16 @@ void Sequencer::OnClockEdge(bool rising, uint32_t now_ms) {
     previous_clock_ticks_        = now_ms;
     step_changed_on_clock_pulse_ = true;
 
-    // Phase A: every voice advances every edge.
-    // Phase B (audit 2d) will gate this on the voice's clock_divider:
-    //   if (divider_count_[i] % voices_[i].divider() == 0) Advance(...);
+    // Each voice advances when its accepted-edge counter is divisible by
+    // its clock_divider. divider=1 → every edge. divider=4 → every 4th.
+    // Counter wraps naturally on overflow (uint32_t).
     for (int i = 0; i < kVoiceCount; ++i) {
-      voices_[i].Advance(now_ms, clock_ms_,
-                         params_.scale, params_.scale_length);
+      int div = voices_[i].clock_divider();
+      if (div < 1) div = 1;
+      if (divider_count_[i] % static_cast<uint32_t>(div) == 0) {
+        voices_[i].Advance(now_ms, clock_ms_,
+                           params_.scale, params_.scale_length);
+      }
       ++divider_count_[i];
     }
   }

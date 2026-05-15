@@ -87,6 +87,7 @@ class Voice {
   int       last_played_step() const { return last_played_step_; }
   uint16_t  last_dac()         const { return last_dac_; }
   bool      trig_active()      const { return trigger_active_; }
+  int       clock_divider()    const { return params_.clock_divider; }
   const uint16_t* cv_sequence()      const { return cv_sequence_; }
   const uint8_t*  trigger_sequence() const { return trigger_sequence_; }
 
