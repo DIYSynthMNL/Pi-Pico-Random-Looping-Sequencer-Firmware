@@ -564,8 +564,11 @@ void SingleSelectEditView::Draw(FakeOled& oled) const {
   oled.Text(2, 4, header);
   oled.Rect(0, 0, 128, 15);
 
+  // Shrink the list to 3 rows when we're going to draw a preview at
+  // the bottom (typical case for the Scale picker).
+  const auto preview_fn = item_->preview_fn();
+  const int  total_lines = preview_fn ? 3 : 4;
   const int visible = item_->option_count() - scroll_start_;
-  const int total_lines = 4;
   const int rows = (visible < total_lines) ? visible : total_lines;
   const int previously_selected = item_->selected_index();
   for (int i = 0; i < rows; ++i) {
@@ -593,6 +596,13 @@ void SingleSelectEditView::Draw(FakeOled& oled) const {
     } else {
       oled.Text(0, y, line, true);
     }
+  }
+
+  // Preview strip at the bottom (y=54..63) — caller-supplied drawing
+  // showing something specific to the highlighted option (e.g. the
+  // scale's interval pattern as a piano-roll bar).
+  if (preview_fn) {
+    preview_fn(draft_index_, oled, /*x=*/0, /*y=*/54, /*w=*/128, /*h=*/10);
   }
 }
 

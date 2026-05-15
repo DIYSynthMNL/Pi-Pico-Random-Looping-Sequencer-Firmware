@@ -851,6 +851,31 @@ static void BuildMenu() {
       "Scale", g_scale_names.data(), seq::kNumScales, g_scale_idx);
   // Wire the scale section info — Scales.h provides ScaleSectionForIndex.
   g_scale_item->SetSectionForIndex(&seq::ScaleSectionForIndex);
+  // Wire a per-scale preview that paints the 12 semitones of the scale
+  // as a tiny piano-roll bar — lit cell means "the scale contains this
+  // semitone." Helps the user "see" the scale's shape while browsing.
+  g_scale_item->SetPreviewFn([](int idx, seq::FakeOled& oled,
+                                int x, int y, int w, int h) {
+    if (idx < 0 || idx >= seq::kNumScales) return;
+    const seq::ScaleInterval& s = seq::kScales[idx];
+    bool in_scale[12] = {true};   // root is always present
+    int note = 0;
+    for (int i = 0; i < s.step_count; ++i) {
+      note = (note + s.steps[i]) % 12;
+      if (note >= 0 && note < 12) in_scale[note] = true;
+    }
+    // 12 columns spread evenly across the rect.
+    const int cell_w = w / 12;
+    for (int i = 0; i < 12; ++i) {
+      const int cx = x + i * cell_w;
+      if (in_scale[i]) {
+        oled.FillRect(cx + 1, y + 1, cell_w - 2, h - 2);
+      } else {
+        // single dim dot — slot exists but is not in scale
+        oled.Px(cx + cell_w / 2, y + h / 2, true);
+      }
+    }
+  });
   g_cv_prob_item      = new seq::NumericalItem("CVProb",    0,  0, 100, 5);
   g_trig_prob_item    = new seq::NumericalItem("TrigProb",  0,  0, 100, 5);
   g_trig_length_item  = new seq::NumericalItem("TrgLngth%",50,  0, 100, 10);

@@ -295,12 +295,22 @@ class SingleSelectItem : public MenuItem {
   void SetSectionForIndex(SectionForIndexFn fn) { section_fn_ = fn; }
   SectionForIndexFn section_for_index_fn() const { return section_fn_; }
 
+  // Optional per-option preview drawer. If set, SingleSelectEditView
+  // shrinks its list to 3 rows and calls this in the bottom strip so
+  // the user sees something specific to the highlighted option (e.g.
+  // a scale's interval pattern as a 12-note piano-roll bar).
+  typedef void (*PreviewFn)(int idx, FakeOled& oled,
+                            int x, int y, int w, int h);
+  void SetPreviewFn(PreviewFn fn) { preview_fn_ = fn; }
+  PreviewFn preview_fn() const { return preview_fn_; }
+
  private:
   const char*        name_;
   const char* const* options_;
   int                option_count_;
   int                selected_;
   SectionForIndexFn  section_fn_ = nullptr;
+  PreviewFn          preview_fn_ = nullptr;
 };
 
 // Like SingleSelectItem, but the editor lays out options in a grid
