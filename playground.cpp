@@ -155,13 +155,14 @@ seq::NumericalItem*       g_trig_length_item  = nullptr;
 seq::NumericalItem*       g_steps_item        = nullptr;
 seq::NumericalItem*       g_octaves_item      = nullptr;
 seq::NumericalItem*       g_start_note_item   = nullptr;
-// Replaced ClkDiv + ClkMult with a single Step rate SingleSelect.
-seq::SingleSelectItem*    g_step_rate_item    = nullptr;
+// Replaced ClkDiv + ClkMult with a single Step rate, rendered as a
+// 3x3 grid on the OLED.
+seq::GridSelectItem*      g_step_rate_item    = nullptr;
 seq::ActionItem*          g_clear_cv_item     = nullptr;  // audit 2a
 seq::ActionItem*          g_clear_trig_item   = nullptr;  // audit 2a
 seq::ToggleItem*          g_run_item          = nullptr;  // audit 2f
-seq::SingleSelectItem*    g_cv_source_item    = nullptr;
-seq::SingleSelectItem*    g_dig_in_item       = nullptr;  // audit 2e
+seq::GridSelectItem*      g_cv_source_item    = nullptr;
+seq::GridSelectItem*      g_dig_in_item       = nullptr;  // audit 2e
 
 // Submenu-entry items on the main menu (each pushes its child menu).
 seq::SubmenuItem*         g_clock_sub_item    = nullptr;
@@ -537,15 +538,18 @@ static void BuildMenu() {
                                                seq::kMinOctaves,
                                                seq::kMaxOctaves, 1);
   g_start_note_item   = new seq::NumericalItem("Start note",0,  0, 36, 1);
-  g_step_rate_item    = new seq::SingleSelectItem(
-      "Step rate", kStepRateNames, kStepRateCount, kStepRateDefault);
+  g_step_rate_item    = new seq::GridSelectItem(
+      "Step rate", kStepRateNames, kStepRateCount, kStepRateDefault,
+      /*cols=*/3);
   g_clear_cv_item     = new seq::ActionItem("Clear CV",   &ActionClearCv,       nullptr);
   g_clear_trig_item   = new seq::ActionItem("Clear Trig", &ActionClearTriggers, nullptr);
-  g_cv_source_item    = new seq::SingleSelectItem(
-      "CV Source", kCvSourceNames, kCvSourceCount, 0);
-  g_dig_in_item       = new seq::SingleSelectItem(
+  g_cv_source_item    = new seq::GridSelectItem(
+      "CV Source", kCvSourceNames, kCvSourceCount, 0,
+      /*cols=*/3);
+  g_dig_in_item       = new seq::GridSelectItem(
       "DigIn", kDigInModeNames, kDigInModeCount,
-      static_cast<int>(seq::DigitalInMode::Reset));
+      static_cast<int>(seq::DigitalInMode::Reset),
+      /*cols=*/2);
 
   // ---- Category submenus ----
   g_clock_items = {

@@ -204,6 +204,88 @@ View* SingleSelectItem::OnPressInList(ViewStack& /*stack*/,
 }
 
 // ============================================================
+//  GridSelectItem
+// ============================================================
+void GridSelectItem::Repr(char* out, int cap) const {
+  // Same format as SingleSelectItem — "Name:value" on the main list row.
+  std::snprintf(out, cap, "%s:%s", name_, options_[selected_]);
+}
+
+View* GridSelectItem::OnPressInList(ViewStack& /*stack*/,
+                                    MenuListView& list) {
+  return new GridSelectEditView(this, &list);
+}
+
+// ============================================================
+//  GridSelectEditView
+// ============================================================
+void GridSelectEditView::OnRotate(int delta) {
+  draft_index_ += delta;
+  if (draft_index_ < 0)                                draft_index_ = 0;
+  if (draft_index_ >= item_->option_count())           draft_index_ = item_->option_count() - 1;
+}
+
+void GridSelectEditView::OnPress() {
+  item_->set_selected_index(draft_index_);
+  if (stack_) stack_->Pop();
+  if (parent_) parent_->NotifyCommit();
+}
+
+void GridSelectEditView::Draw(FakeOled& oled) const {
+  oled.Clear();
+  oled.Text(2, 4, item_->name());
+  oled.Rect(0, 0, 128, 15);
+
+  const int cols  = (item_->cols() < 1) ? 1 : item_->cols();
+  const int count = item_->option_count();
+  const int rows  = (count + cols - 1) / cols;
+
+  // Body area below the title bar.
+  constexpr int kBodyTop = 17;
+  constexpr int kBodyBot = 63;
+  const int     body_h   = kBodyBot - kBodyTop;
+  const int     cell_w   = 128 / cols;
+  const int     cell_h   = (rows > 0) ? (body_h / rows) : body_h;
+
+  const int prev_selected = item_->selected_index();
+
+  for (int i = 0; i < count; ++i) {
+    const int col   = i % cols;
+    const int row   = i / cols;
+    const int x     = col * cell_w;
+    const int y     = kBodyTop + row * cell_h;
+    const int w     = (col == cols - 1) ? (128 - x) : cell_w;
+    const int h     = cell_h;
+    const bool draft = (i == draft_index_);
+    const bool was  = (i == prev_selected);
+
+    if (draft) {
+      oled.FillRect(x, y, w, h, true);
+    } else {
+      oled.Rect(x, y, w, h);
+    }
+
+    // Centre the label inside the cell.
+    const char* lbl = item_->options()[i];
+    const int   len = static_cast<int>(std::strlen(lbl));
+    const int   tx  = x + (w - len * 6) / 2;
+    const int   ty  = y + (h - 8) / 2;
+    oled.Text(tx, ty, lbl, !draft);
+
+    // Mark the previously-committed option with a small dot in the
+    // top-left corner so the user remembers what was set before.
+    if (was && !draft) {
+      oled.Px(x + 2, y + 2, true);
+    }
+    if (was && draft) {
+      // On inverted background, draw the marker as an off pixel so it
+      // still reads.
+      oled.Px(x + 2, y + 2, false);
+    }
+  }
+}
+
+// ============================================================
 //  NumericalEditView
 // ============================================================
 void NumericalEditView::OnRotate(int delta) {

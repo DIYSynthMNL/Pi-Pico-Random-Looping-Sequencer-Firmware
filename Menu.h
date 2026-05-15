@@ -228,6 +228,39 @@ class SingleSelectItem : public MenuItem {
   int                selected_;
 };
 
+// Like SingleSelectItem, but the editor lays out options in a grid
+// rather than a vertical scroll list. Right choice when you have ≤16
+// options with short labels (≤ ~5 chars) — uses screen real estate
+// way better than 4-tall scrolling.
+//
+// Caller picks the column count; the row count derives from
+// option_count / cols. Labels are centred in each cell.
+class GridSelectItem : public MenuItem {
+ public:
+  GridSelectItem(const char* name,
+                 const char* const* options, int option_count,
+                 int initial_index, int cols)
+      : name_(name), options_(options), option_count_(option_count),
+        selected_(initial_index), cols_(cols) {}
+  const char* name() const override { return name_; }
+  void Repr(char* out, int cap) const override;
+  View* OnPressInList(ViewStack& stack, MenuListView& list) override;
+
+  int  selected_index() const { return selected_; }
+  void set_selected_index(int i) { selected_ = i; }
+  const char* selected_label() const { return options_[selected_]; }
+  const char* const* options() const { return options_; }
+  int  option_count() const { return option_count_; }
+  int  cols()         const { return cols_; }
+
+ private:
+  const char*        name_;
+  const char* const* options_;
+  int                option_count_;
+  int                selected_;
+  int                cols_;
+};
+
 // ============================================================
 //  Editor views — pushed by NumericalItem / SingleSelectItem
 // ============================================================
@@ -267,6 +300,19 @@ class SingleSelectEditView : public View {
   MenuListView*     parent_;
   int               draft_index_;
   int               scroll_start_;
+};
+
+class GridSelectEditView : public View {
+ public:
+  GridSelectEditView(GridSelectItem* item, MenuListView* parent)
+      : item_(item), parent_(parent), draft_index_(item->selected_index()) {}
+  void Draw(FakeOled& oled) const override;
+  void OnRotate(int delta) override;
+  void OnPress() override;
+ private:
+  GridSelectItem* item_;
+  MenuListView*   parent_;
+  int             draft_index_;
 };
 
 }  // namespace seq
