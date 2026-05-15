@@ -897,6 +897,13 @@ static void SaveStateLocked() {
   std::fprintf(f, "audition_release_ms=%f\n",  g_audition_release_ms.load());
   std::fprintf(f, "playback_layout=%d\n",
                static_cast<int>(g_playback_view.layout()));
+  // View menu toggles — which ImGui windows are visible.
+  std::fprintf(f, "show_oled=%d\n",      g_show_oled      ? 1 : 0);
+  std::fprintf(f, "show_hardware=%d\n",  g_show_hardware  ? 1 : 0);
+  std::fprintf(f, "show_quicknav=%d\n",  g_show_quicknav  ? 1 : 0);
+  std::fprintf(f, "show_params=%d\n",    g_show_params    ? 1 : 0);
+  std::fprintf(f, "show_sim=%d\n",       g_show_sim       ? 1 : 0);
+  std::fprintf(f, "show_inspector=%d\n", g_show_inspector ? 1 : 0);
 
   // Live sequences (the user's mutating pattern)
   const seq::Voice& v = g_sequencer.voice(0);
@@ -954,6 +961,12 @@ static void LoadStateLocked() {
     else if (!std::strcmp(key, "audition_pitch_semis")) { g_audition_pitch_semis.store(fl()); }
     else if (!std::strcmp(key, "audition_attack_ms"))   { g_audition_attack_ms.store(fl()); }
     else if (!std::strcmp(key, "audition_release_ms"))  { g_audition_release_ms.store(fl()); }
+    else if (!std::strcmp(key, "show_oled"))       { g_show_oled      = (i() != 0); }
+    else if (!std::strcmp(key, "show_hardware"))   { g_show_hardware  = (i() != 0); }
+    else if (!std::strcmp(key, "show_quicknav"))   { g_show_quicknav  = (i() != 0); }
+    else if (!std::strcmp(key, "show_params"))     { g_show_params    = (i() != 0); }
+    else if (!std::strcmp(key, "show_sim"))        { g_show_sim       = (i() != 0); }
+    else if (!std::strcmp(key, "show_inspector")) { g_show_inspector = (i() != 0); }
     else if (!std::strcmp(key, "playback_layout"))  {
       // We don't have a public setter; cycle the layout until it matches
       const int target = i();
@@ -2197,10 +2210,12 @@ int main() {
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     glfwSwapBuffers(win);
 
-    // Periodic save — every 2 s, capture Sim-window changes and live
-    // cv/trig mutations that don't fire OnMenuCommit.
+    // Periodic save — every 500 ms, capture Sim-window changes, layout
+    // cycles, View menu toggles, and live cv/trig mutations that don't
+    // fire OnMenuCommit. Tight enough that a quick kill rarely loses
+    // unsaved state.
     const auto now = std::chrono::steady_clock::now();
-    if (now - last_save > std::chrono::seconds(2)) {
+    if (now - last_save > std::chrono::milliseconds(500)) {
       std::lock_guard<std::mutex> lk(g_mutex);
       SaveStateLocked();
       last_save = now;
