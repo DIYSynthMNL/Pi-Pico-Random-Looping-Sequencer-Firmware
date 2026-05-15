@@ -996,6 +996,119 @@ static void RenderHardwareWindow() {
 }
 
 // ============================================================
+//  Params window — sim-only direct edit of every engine param
+// ============================================================
+// Bidirectionally synced with the OLED menu: change a slider here and
+// the menu reflects it next frame; commit a menu edit and the sliders
+// update. Lives in its own window because on hardware there are no
+// sliders — the encoder + menu is the only path. Sim users can use
+// whichever they prefer.
+static void RenderParamsWindow() {
+  ImGui::Begin("Params (sim direct edit)");
+  ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
+                     "Direct sliders — syncs both ways with the OLED menu.");
+  ImGui::Separator();
+
+  bool changed = false;
+  bool run, cv_erase_unused;  // no longer applicable; keep var to avoid clutter
+  int  cv_prob, trig_prob, trig_len, steps, octs, start_note, clk_div, clk_mult;
+  int  cv_source_idx, dig_in_idx, scale_idx;
+  {
+    std::lock_guard<std::mutex> lk(g_mutex);
+    run           = g_run_item->value();
+    cv_prob       = g_cv_prob_item->value();
+    trig_prob     = g_trig_prob_item->value();
+    trig_len      = g_trig_length_item->value();
+    steps         = g_steps_item->value();
+    octs          = g_octaves_item->value();
+    start_note    = g_start_note_item->value();
+    clk_div       = g_clk_div_item->value();
+    clk_mult      = g_clk_mult_item->value();
+    cv_source_idx = g_cv_source_item->selected_index();
+    dig_in_idx    = g_dig_in_item->selected_index();
+    scale_idx     = g_scale_item->selected_index();
+  }
+  (void)cv_erase_unused;
+
+  ImGui::SeparatorText("Transport");
+  changed |= ImGui::Checkbox("Run", &run);
+
+  ImGui::SeparatorText("Pitch");
+  if (ImGui::BeginCombo("Scale", seq::kScales[scale_idx].name)) {
+    for (int i = 0; i < seq::kNumScales; ++i) {
+      bool sel = (i == scale_idx);
+      if (ImGui::Selectable(seq::kScales[i].name, sel)) {
+        scale_idx = i;
+        changed = true;
+      }
+    }
+    ImGui::EndCombo();
+  }
+  changed |= ImGui::SliderInt("Octaves",       &octs,       seq::kMinOctaves, seq::kMaxOctaves);
+  changed |= ImGui::SliderInt("Start note",    &start_note, 0, 36);
+  if (ImGui::BeginCombo("CV source", kCvSourceNames[cv_source_idx])) {
+    for (int i = 0; i < kCvSourceCount; ++i) {
+      bool sel = (i == cv_source_idx);
+      if (ImGui::Selectable(kCvSourceNames[i], sel)) {
+        cv_source_idx = i;
+        changed = true;
+      }
+    }
+    ImGui::EndCombo();
+  }
+
+  ImGui::SeparatorText("Clock");
+  changed |= ImGui::SliderInt("Steps",            &steps,    seq::kMinSteps, seq::kMaxSteps);
+  changed |= ImGui::SliderInt("Clock divider",    &clk_div,  1, 16);
+  changed |= ImGui::SliderInt("Clock multiplier", &clk_mult, 1, 16);
+  if (ImGui::BeginCombo("Digital-in mode", kDigInModeNames[dig_in_idx])) {
+    for (int i = 0; i < kDigInModeCount; ++i) {
+      bool sel = (i == dig_in_idx);
+      if (ImGui::Selectable(kDigInModeNames[i], sel)) {
+        dig_in_idx = i;
+        changed = true;
+      }
+    }
+    ImGui::EndCombo();
+  }
+
+  ImGui::SeparatorText("Probability");
+  changed |= ImGui::SliderInt("CV change %",   &cv_prob,    0, 100);
+  changed |= ImGui::SliderInt("Trig change %", &trig_prob,  0, 100);
+  changed |= ImGui::SliderInt("Trig length %", &trig_len,   0, 100);
+
+  ImGui::SeparatorText("Actions");
+  if (ImGui::Button("Clear CV", ImVec2(120, 0))) {
+    std::lock_guard<std::mutex> lk(g_mutex);
+    ActionClearCv(nullptr);
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Clear Trig", ImVec2(120, 0))) {
+    std::lock_guard<std::mutex> lk(g_mutex);
+    ActionClearTriggers(nullptr);
+  }
+
+  if (changed) {
+    std::lock_guard<std::mutex> lk(g_mutex);
+    g_run_item       ->set_value(run);
+    g_scale_item     ->set_selected_index(scale_idx);
+    g_cv_prob_item   ->set_value(cv_prob);
+    g_trig_prob_item ->set_value(trig_prob);
+    g_trig_length_item->set_value(trig_len);
+    g_steps_item     ->set_value(steps);
+    g_octaves_item   ->set_value(octs);
+    g_start_note_item->set_value(start_note);
+    g_clk_div_item   ->set_value(clk_div);
+    g_clk_mult_item  ->set_value(clk_mult);
+    g_cv_source_item ->set_selected_index(cv_source_idx);
+    g_dig_in_item    ->set_selected_index(dig_in_idx);
+    OnMenuCommit(nullptr);
+  }
+
+  ImGui::End();
+}
+
+// ============================================================
 //  Quick Nav window — sim-only navigation shortcuts
 // ============================================================
 // Direct buttons for things you'd otherwise have to encoder-dance for.
@@ -1219,6 +1332,7 @@ int main() {
     RenderOledWidget();
     RenderHardwareWindow();
     RenderQuickNavWindow();
+    RenderParamsWindow();
     RenderSimWindow();
     RenderInspectorWindow();
     ImGui::Render();
