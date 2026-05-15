@@ -48,12 +48,15 @@ struct VoiceParams {
   int  trig_change_pct    = 0;
   int  trig_length_pct    = 50;
 
-  // Skip (n-1) of every n clock edges arriving at the Sequencer. 1 = every
-  // edge advances this voice. >1 lets each voice run at its own rate, which
-  // is the basic ambient-poly trick (voice 1 every 1/4, voice 2 every 1/8…).
-  // Wired through Sequencer in Phase B; field is here in Phase A to lock the
-  // VoiceParams shape.
+  // Per-voice clock rate. Effective rate = clock_multiplier / clock_divider.
+  //   divider only:           1/2, 1/3, 1/4 … (slower than the master clock)
+  //   multiplier only:        x2, x3, x4 …    (faster — Sequencer fires
+  //                           sub-edges between external clock edges)
+  //   both > 1:               any rational ratio, e.g. mult=3 div=2 → 3:2
+  // Sequencer's sub-edge scheduler is the source of truth for the
+  // multiplier; this struct just carries the params for it to read.
   int  clock_divider      = 1;
+  int  clock_multiplier   = 1;
 
   CvSource cv_source      = CvSource::Normal;
 };
@@ -93,6 +96,7 @@ class Voice {
   uint16_t  last_dac()         const { return last_dac_; }
   bool      trig_active()      const { return trigger_active_; }
   int       clock_divider()    const { return params_.clock_divider; }
+  int       clock_multiplier() const { return params_.clock_multiplier; }
   const uint16_t* cv_sequence()      const { return cv_sequence_; }
   const uint8_t*  trigger_sequence() const { return trigger_sequence_; }
 

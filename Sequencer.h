@@ -67,9 +67,17 @@ class Sequencer {
   uint32_t  previous_clock_ticks_        = 0;
   uint32_t  clock_ms_                    = kDefaultClockMs;
 
-  // Per-voice divider counter — increments each rising edge that the
-  // sequencer accepts, voice advances when counter % divider == 0.
+  // Per-voice edge counter — increments on each accepted (external + sub-)
+  // edge. Voice advances when counter % divider == 0. The clock multiplier
+  // schedules sub-edges that count just like external ones.
   uint32_t  divider_count_[kVoiceCount]  = {0};
+
+  // Sub-edge scheduler state (one slot per voice). When clock_multiplier
+  // is > 1, OnClockEdge sets up `sub_edges_remaining_` advances spaced by
+  // `sub_edge_interval_ms_`; Tick() fires them as they come due.
+  int       sub_edges_remaining_[kVoiceCount] = {0};
+  uint32_t  sub_edge_interval_ms_[kVoiceCount] = {0};
+  uint32_t  next_sub_edge_ms_[kVoiceCount]     = {0};
 };
 
 }  // namespace seq

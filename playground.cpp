@@ -93,6 +93,7 @@ std::atomic<bool>  g_audition_enabled{false};
 std::atomic<float> g_audition_volume{0.25f};
 std::atomic<float> g_audition_attack_ms{8.0f};
 std::atomic<float> g_audition_release_ms{300.0f};
+std::atomic<float> g_audition_pitch_semis{0.0f};  // global transpose, ±48 semitones
 
 // Audio-thread-only state (the audio thread is the only writer).
 float g_audio_phase     = 0.0f;
@@ -122,6 +123,7 @@ seq::NumericalItem*       g_steps_item        = nullptr;
 seq::NumericalItem*       g_octaves_item      = nullptr;
 seq::NumericalItem*       g_start_note_item   = nullptr;
 seq::NumericalItem*       g_clk_div_item      = nullptr;  // audit 2d
+seq::NumericalItem*       g_clk_mult_item     = nullptr;  // task A8
 seq::ActionItem*          g_clear_cv_item     = nullptr;  // audit 2a
 seq::ActionItem*          g_clear_trig_item   = nullptr;  // audit 2a
 seq::ToggleItem*          g_run_item          = nullptr;  // audit 2f
@@ -173,6 +175,7 @@ static void OnMenuCommit(void* /*user*/) {
   g_octaves                    = g_octaves_item->value();
   g_starting_note              = g_start_note_item->value();
   g_vparams.clock_divider      = g_clk_div_item->value();
+  g_vparams.clock_multiplier   = g_clk_mult_item->value();
   g_vparams.cv_source          = static_cast<seq::CvSource>(
       g_cv_source_item->selected_index());
 
@@ -209,6 +212,7 @@ static void BuildMenu() {
                                                seq::kMaxOctaves, 1);
   g_start_note_item   = new seq::NumericalItem("Start note",0,  0, 36, 1);
   g_clk_div_item      = new seq::NumericalItem("ClkDiv",   1,  1, 16, 1);
+  g_clk_mult_item     = new seq::NumericalItem("ClkMult",  1,  1, 16, 1);
   g_clear_cv_item     = new seq::ActionItem("Clear CV",   &ActionClearCv,       nullptr);
   g_clear_trig_item   = new seq::ActionItem("Clear Trig", &ActionClearTriggers, nullptr);
   g_cv_source_item    = new seq::SingleSelectItem(
@@ -221,7 +225,8 @@ static void BuildMenu() {
   g_items = {
     g_run_item, g_scale_item,
     g_cv_prob_item, g_trig_prob_item, g_trig_length_item,
-    g_steps_item, g_octaves_item, g_start_note_item, g_clk_div_item,
+    g_steps_item, g_octaves_item, g_start_note_item,
+    g_clk_div_item, g_clk_mult_item,
     g_cv_source_item, g_dig_in_item,
     g_clear_cv_item, g_clear_trig_item,
   };
@@ -365,6 +370,10 @@ static void RenderControlsWindow() {
   if (ImGui::Checkbox("Audio on", &aud)) g_audition_enabled.store(aud);
   float vol = g_audition_volume.load();
   if (ImGui::SliderFloat("Volume", &vol, 0.0f, 1.0f, "%.2f")) g_audition_volume.store(vol);
+  float pitch = g_audition_pitch_semis.load();
+  if (ImGui::SliderFloat("Pitch (semis)", &pitch, -48.0f, 48.0f, "%+.1f")) g_audition_pitch_semis.store(pitch);
+  ImGui::SameLine();
+  if (ImGui::Button("0##pitch_reset")) g_audition_pitch_semis.store(0.0f);
   float atk = g_audition_attack_ms.load();
   if (ImGui::SliderFloat("Attack ms", &atk, 1.0f, 500.0f, "%.0f")) g_audition_attack_ms.store(atk);
   float rel = g_audition_release_ms.load();
@@ -372,7 +381,7 @@ static void RenderControlsWindow() {
 
   ImGui::SeparatorText("Direct param edit (syncs to menu)");
   bool changed = false;
-  int  cv_prob, trig_prob, trig_len, steps, octs, start_note, clk_div;
+  int  cv_prob, trig_prob, trig_len, steps, octs, start_note, clk_div, clk_mult;
   bool run;
   int  cv_source_idx, dig_in_idx, scale_idx;
   {
@@ -385,6 +394,7 @@ static void RenderControlsWindow() {
     octs          = g_octaves_item->value();
     start_note    = g_start_note_item->value();
     clk_div       = g_clk_div_item->value();
+    clk_mult      = g_clk_mult_item->value();
     cv_source_idx = g_cv_source_item->selected_index();
     dig_in_idx    = g_dig_in_item->selected_index();
     scale_idx     = g_scale_item->selected_index();
@@ -404,7 +414,8 @@ static void RenderControlsWindow() {
   changed |= ImGui::SliderInt("Steps",         &steps,      seq::kMinSteps,   seq::kMaxSteps);
   changed |= ImGui::SliderInt("Octaves",       &octs,       seq::kMinOctaves, seq::kMaxOctaves);
   changed |= ImGui::SliderInt("Start note",    &start_note, 0, 36);
-  changed |= ImGui::SliderInt("Clock divider", &clk_div,    1, 16);
+  changed |= ImGui::SliderInt("Clock divider",    &clk_div,  1, 16);
+  changed |= ImGui::SliderInt("Clock multiplier", &clk_mult, 1, 16);
   changed |= ImGui::SliderInt("CV change %",   &cv_prob,    0, 100);
   changed |= ImGui::SliderInt("Trig change %", &trig_prob,  0, 100);
   changed |= ImGui::SliderInt("Trig length %", &trig_len,   0, 100);
@@ -454,6 +465,7 @@ static void RenderControlsWindow() {
     g_octaves_item->set_value(octs);
     g_start_note_item->set_value(start_note);
     g_clk_div_item->set_value(clk_div);
+    g_clk_mult_item->set_value(clk_mult);
     g_cv_source_item->set_selected_index(cv_source_idx);
     g_dig_in_item->set_selected_index(dig_in_idx);
     OnMenuCommit(nullptr);
@@ -613,11 +625,12 @@ static int AuditionCb(const void* /*input*/, void* output,
     return paContinue;
   }
 
-  const uint16_t dac        = g_disp_dac.load(std::memory_order_relaxed);
-  const bool     trig       = g_disp_trig.load(std::memory_order_relaxed);
-  const float    volume     = g_audition_volume.load(std::memory_order_relaxed);
-  const float    attack_ms  = g_audition_attack_ms.load(std::memory_order_relaxed);
-  const float    release_ms = g_audition_release_ms.load(std::memory_order_relaxed);
+  const uint16_t dac          = g_disp_dac.load(std::memory_order_relaxed);
+  const bool     trig         = g_disp_trig.load(std::memory_order_relaxed);
+  const float    volume       = g_audition_volume.load(std::memory_order_relaxed);
+  const float    attack_ms    = g_audition_attack_ms.load(std::memory_order_relaxed);
+  const float    release_ms   = g_audition_release_ms.load(std::memory_order_relaxed);
+  const float    pitch_offset = g_audition_pitch_semis.load(std::memory_order_relaxed);
 
   // Edge-detect trig → env state transitions
   if (trig && !g_audio_prev_trig)        g_audio_env_stage = EnvStage::Attack;
@@ -627,7 +640,7 @@ static int AuditionCb(const void* /*input*/, void* output,
   // DAC → MIDI → Hz. Matches main.py's note*68 convention: 68 DAC units
   // per semitone. Base offset of 24 puts the lowest reachable note at
   // C1 (~32.7 Hz), giving headroom for the full 5-octave scale span.
-  const float midi      = 24.0f + static_cast<float>(dac) / 68.0f;
+  const float midi      = 24.0f + static_cast<float>(dac) / 68.0f + pitch_offset;
   const float freq_hz   = 440.0f * std::pow(2.0f, (midi - 69.0f) / 12.0f);
   const float phase_inc = kTwoPi * freq_hz / static_cast<float>(kAudioSampleRate);
 
@@ -752,7 +765,8 @@ int main() {
   delete g_trig_prob_item;   delete g_trig_length_item;
   delete g_steps_item;       delete g_octaves_item;
   delete g_start_note_item;  delete g_clk_div_item;
-  delete g_clear_cv_item;    delete g_clear_trig_item;
+  delete g_clk_mult_item;    delete g_clear_cv_item;
+  delete g_clear_trig_item;
   delete g_run_item;         delete g_cv_source_item;
   delete g_dig_in_item;
   return 0;
