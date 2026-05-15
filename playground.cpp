@@ -278,6 +278,40 @@ static void DacToNoteName(uint16_t dac, char* out, int cap) {
   std::snprintf(out, cap, "%s%d", kNoteNames[idx], octave);
 }
 
+// Tight proportional text rendering — advances by each glyph's actual
+// content width (last non-zero col + 1) plus a fixed 1-col gap. Use
+// this for note-name display where the bitmap font's natural blank
+// columns between sparse-edge chars (C+3, C+1, F+3, etc.) read as a
+// visible space and look wrong. Returns the x of the column just past
+// the last drawn pixel — caller can place text immediately after.
+static int DrawTightText(seq::FakeOled& oled, int x, int y, const char* s,
+                         int scale = 1) {
+  int pen = x;
+  for (const char* p = s; *p; ++p) {
+    const uint8_t* g = seq::FakeOled::Glyph(*p);
+    int left = 6, right = -1;
+    for (int c = 0; c < 6; ++c) {
+      if (g[c] != 0) { if (c < left) left = c; if (c > right) right = c; }
+    }
+    if (right < left) { pen += 3 * scale; continue; }   // empty glyph (space)
+    for (int c = left; c <= right; ++c) {
+      const uint8_t bits = g[c];
+      for (int row = 0; row < 8; ++row) {
+        if (bits & (1u << row)) {
+          if (scale == 1) {
+            oled.Px(pen + (c - left), y + row, true);
+          } else {
+            oled.FillRect(pen + (c - left) * scale, y + row * scale,
+                          scale, scale, true);
+          }
+        }
+      }
+    }
+    pen += (right - left + 1) * scale + scale;   // content + 1-col gap
+  }
+  return pen;
+}
+
 // ============================================================
 //  Icons — 6x8 pixel bitmaps drawn directly into the OLED buffer
 // ============================================================
@@ -432,14 +466,20 @@ class PlaybackView : public seq::View {
     char now_note[8];
     DacToNoteName(g_disp_dac.load(), now_note, sizeof(now_note));
 
-    // Play/Stop icon at the far left, then text. `%-6.6s` truncates the
-    // scale name to exactly 6 chars (was 7 — overflowed into the
-    // direction icon at x=112 for long scale names like "Pentatonic").
+    // Play/Stop icon at the far left, then text.
     icons::Draw(oled, run ? icons::kPlay : icons::kStop, 1, 1);
-    char header[24];
-    std::snprintf(header, sizeof(header), " %-3s %-6.6s %02d/%02d",
-                  now_note, scale, step + 1, steps);
-    oled.Text(8, 1, header);
+    // Note name first, with tight kerning — fixed-pitch rendering made
+    // "C3" look like "C 3" because both have sparse edge columns. After
+    // tight render, advance to the next 6-px slot for the rest of the
+    // header (so the scale name lines up at a stable column).
+    int pen = DrawTightText(oled, 10, 1, now_note);
+    // Pad to column x=32 so scale always starts at the same place
+    // regardless of note width — keeps the rest of the header stable.
+    if (pen < 32) pen = 32;
+    char tail[24];
+    std::snprintf(tail, sizeof(tail), "%-6.6s %02d/%02d",
+                  scale, step + 1, steps);
+    oled.Text(pen, 1, tail);
 
     // Direction indicator just to the left of the trig area. Picks an
     // icon based on the current step direction so pendulum/random are
@@ -742,37 +782,8 @@ class PlaybackView : public seq::View {
     constexpr int kBigY = 14;
     char now_note[8];
     DacToNoteName(g_disp_dac.load(), now_note, sizeof(now_note));
-    // Big note name — 2x scale with *proportional* spacing. The bitmap
-    // font's '1' glyph has a blank leftmost column ({0x00, 0x42, 0x7F,
-    // 0x40, 0x00, 0x00}), so "C1" rendered with fixed 6-col advance
-    // shows a visible gap that reads as "C 1" — especially at 2x. We
-    // trim each glyph's blank columns and re-space with a uniform 1-col
-    // gap so adjacent glyphs touch consistently.
-    {
-      const int ox = 4;
-      const int oy = kBigY;
-      int pen = ox;
-      for (const char* p = now_note; *p; ++p) {
-        const uint8_t* g = seq::FakeOled::Glyph(*p);
-        int left = 6, right = -1;
-        for (int c = 0; c < 6; ++c) {
-          if (g[c] != 0) { if (c < left) left = c; if (c > right) right = c; }
-        }
-        if (right < left) {
-          pen += 3 * 2;   // empty glyph (space) — small fixed advance
-          continue;
-        }
-        for (int c = left; c <= right; ++c) {
-          const uint8_t bits = g[c];
-          for (int row = 0; row < 8; ++row) {
-            if (bits & (1u << row)) {
-              oled.FillRect(pen + (c - left) * 2, oy + row * 2, 2, 2, true);
-            }
-          }
-        }
-        pen += (right - left + 1) * 2 + 2;   // content + 1-col gap, ×2
-      }
-    }
+    // Big note name at 2x with tight proportional spacing.
+    DrawTightText(oled, 4, kBigY, now_note, /*scale=*/2);
     // Right column: BPM big-ish.
     {
       char bpm_buf[12];
