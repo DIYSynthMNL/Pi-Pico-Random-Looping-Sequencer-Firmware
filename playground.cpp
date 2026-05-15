@@ -279,14 +279,12 @@ static void DacToNoteName(uint16_t dac, char* out, int cap) {
 }
 
 // Tight proportional text rendering — advances by each glyph's actual
-// content width. The default 1-col gap was identical to the bitmap
-// font's built-in inter-glyph spacing, so it didn't actually tighten
-// G+2 / C+3 — only digits like '1' that have *structural* blank cols
-// inside the glyph cell. Now configurable; pass gap=0 for note names
-// where the perceived gap between sparse-edge chars is too wide.
-// Returns x of the column just past the last drawn pixel.
+// content width plus an *absolute* (not scaled) gap of `gap` pixels.
+// gap=1 stays a single oled pixel even at 2x scale so chars don't
+// glue together. Returns x of the column just past the last drawn
+// pixel.
 static int DrawTightText(seq::FakeOled& oled, int x, int y, const char* s,
-                         int scale = 1, int gap = 0) {
+                         int scale = 1, int gap = 1) {
   int pen = x;
   for (const char* p = s; *p; ++p) {
     const uint8_t* g = seq::FakeOled::Glyph(*p);
@@ -308,7 +306,7 @@ static int DrawTightText(seq::FakeOled& oled, int x, int y, const char* s,
         }
       }
     }
-    pen += (right - left + 1) * scale + gap * scale;
+    pen += (right - left + 1) * scale + gap;
   }
   return pen;
 }
