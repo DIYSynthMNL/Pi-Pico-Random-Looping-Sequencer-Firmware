@@ -206,9 +206,65 @@ void ActionItem::Repr(char* out, int cap) const {
 }
 
 View* ActionItem::OnPressInList(ViewStack& /*stack*/,
-                                MenuListView& /*list*/) {
+                                MenuListView& list) {
+  if (confirm_) {
+    const char* prompt = confirm_prompt_ ? confirm_prompt_ : name_;
+    return new ConfirmView(prompt, action_, user_, &list);
+  }
   if (action_) action_(user_);
   return nullptr;
+}
+
+// ============================================================
+//  ConfirmView
+// ============================================================
+void ConfirmView::OnRotate(int delta) {
+  // Two options; toggle between them.
+  highlighted_ = (highlighted_ + delta + 2) % 2;
+}
+
+void ConfirmView::OnPress() {
+  const bool said_yes = (highlighted_ == 1);
+  if (stack_) stack_->Pop();
+  if (said_yes && on_yes_) on_yes_(user_);
+  if (said_yes && parent_) parent_->NotifyCommit();
+}
+
+void ConfirmView::Draw(FakeOled& oled) const {
+  oled.Clear();
+  oled.Text(2, 4, "Confirm");
+  oled.Rect(0, 0, 128, 15);
+
+  // Prompt centred just below the title bar
+  const int prompt_w = static_cast<int>(std::strlen(prompt_)) * 6;
+  const int prompt_x = (128 - prompt_w) / 2;
+  oled.Text(prompt_x, 22, prompt_);
+
+  // No / Yes buttons centred horizontally below the prompt
+  constexpr int kBtnW  = 50;
+  constexpr int kBtnH  = 18;
+  constexpr int kBtnY  = 40;
+  constexpr int kGap   = 8;
+  const int left_x  = (128 - 2 * kBtnW - kGap) / 2;
+  const int right_x = left_x + kBtnW + kGap;
+
+  // No button — left
+  if (highlighted_ == 0) oled.FillRect(left_x, kBtnY, kBtnW, kBtnH, true);
+  else                   oled.Rect    (left_x, kBtnY, kBtnW, kBtnH);
+  {
+    const int tw = 12;  // "NO" = 2 chars × 6 px
+    oled.Text(left_x + (kBtnW - tw) / 2, kBtnY + (kBtnH - 8) / 2,
+              "NO", highlighted_ != 0);
+  }
+
+  // Yes button — right
+  if (highlighted_ == 1) oled.FillRect(right_x, kBtnY, kBtnW, kBtnH, true);
+  else                   oled.Rect    (right_x, kBtnY, kBtnW, kBtnH);
+  {
+    const int tw = 18;  // "YES" = 3 chars × 6 px
+    oled.Text(right_x + (kBtnW - tw) / 2, kBtnY + (kBtnH - 8) / 2,
+              "YES", highlighted_ != 1);
+  }
 }
 
 View* NumericalItem::OnPressInList(ViewStack& /*stack*/,
@@ -367,6 +423,10 @@ void NumericalEditView::Draw(FakeOled& oled) const {
   const int val_w = static_cast<int>(std::strlen(val_str)) * 6;
   const int val_x = (128 - val_w) / 2;
   oled.Text(val_x, 18, val_str);
+  // Chevrons flanking the value — hint that encoder rotation changes
+  // it. Reuse the existing row icons.
+  DrawRowIcon(oled, kIconBack,    val_x - 10,        18, true);
+  DrawRowIcon(oled, kIconForward, val_x + val_w + 4, 18, true);
 
   constexpr int kBarX = 4, kBarY = 36, kBarW = 120, kBarH = 8;
   oled.Rect(kBarX, kBarY, kBarW, kBarH);

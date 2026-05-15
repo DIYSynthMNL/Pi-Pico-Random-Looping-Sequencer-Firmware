@@ -4,8 +4,8 @@
 
 namespace seq {
 
-void Voice::Init() {
-  const uint16_t root = ScaleRoot(nullptr, 0);
+void Voice::Init(const uint16_t* scale, int scale_length) {
+  const uint16_t root = ScaleRoot(scale, scale_length);
   for (int i = 0; i < kMaxSteps; ++i) {
     cv_sequence_[i]      = root;
     trigger_sequence_[i] = 1;

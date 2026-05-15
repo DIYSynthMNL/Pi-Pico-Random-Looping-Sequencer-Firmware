@@ -221,8 +221,13 @@ class BackItem : public MenuItem {
 class ActionItem : public MenuItem {
  public:
   typedef void (*Action)(void* user);
-  ActionItem(const char* name, Action action, void* user)
-      : name_(name), action_(action), user_(user) {}
+  // If `confirm` is true, pressing the item pushes a ConfirmView with
+  // a Yes/No prompt instead of firing immediately. `confirm_prompt`
+  // overrides the default prompt text (which is the item's name).
+  ActionItem(const char* name, Action action, void* user,
+             bool confirm = false, const char* confirm_prompt = nullptr)
+      : name_(name), action_(action), user_(user),
+        confirm_(confirm), confirm_prompt_(confirm_prompt) {}
   const char* name() const override { return name_; }
   MenuItemKind kind() const override { return MenuItemKind::Action; }
   void  Repr(char* out, int cap) const override;
@@ -231,6 +236,27 @@ class ActionItem : public MenuItem {
   const char* name_;
   Action      action_;
   void*       user_;
+  bool        confirm_;
+  const char* confirm_prompt_;
+};
+
+// "Are you sure?" prompt with No/Yes buttons. Pushed by an ActionItem
+// constructed with confirm=true. No is the default highlight (safer);
+// long-press = cancel = No. Pressing Yes fires the action and pops.
+class ConfirmView : public View {
+ public:
+  ConfirmView(const char* prompt, void (*on_yes)(void*), void* user,
+              MenuListView* parent)
+      : prompt_(prompt), on_yes_(on_yes), user_(user), parent_(parent) {}
+  void Draw(FakeOled& oled) const override;
+  void OnRotate(int delta) override;
+  void OnPress() override;
+ private:
+  const char* prompt_;
+  void (*on_yes_)(void*);
+  void* user_;
+  MenuListView* parent_;
+  int   highlighted_ = 0;   // 0 = No (default), 1 = Yes
 };
 
 class SingleSelectItem : public MenuItem {

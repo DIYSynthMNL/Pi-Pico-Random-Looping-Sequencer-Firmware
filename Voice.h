@@ -63,7 +63,11 @@ struct VoiceParams {
 
 class Voice {
  public:
-  void Init();
+  // Initialize per-voice state. Pass the current scale + length so the
+  // initial cv_sequence is filled with the scale's root note (not 0).
+  // Both args default to nullptr/0 for callers that don't have a scale
+  // yet — degrades to root=0 in that case.
+  void Init(const uint16_t* scale = nullptr, int scale_length = 0);
   // Reset the playhead to step 0 without clearing the sequences themselves.
   void Reset();
 

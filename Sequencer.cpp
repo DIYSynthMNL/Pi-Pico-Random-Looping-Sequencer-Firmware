@@ -6,7 +6,7 @@ namespace seq {
 
 void Sequencer::Init() {
   for (int i = 0; i < kVoiceCount; ++i) {
-    voices_[i].Init();
+    voices_[i].Init(params_.scale, params_.scale_length);
     divider_count_[i]        = 0;
     sub_edges_remaining_[i]  = 0;
     sub_edge_interval_ms_[i] = 0;

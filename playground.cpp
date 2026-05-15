@@ -846,8 +846,12 @@ static void BuildMenu() {
   g_step_rate_item    = new seq::GridSelectItem(
       "Step rate", kStepRateNames, kStepRateCount, kStepRateDefault,
       /*cols=*/3);
-  g_clear_cv_item     = new seq::ActionItem("Clear CV",   &ActionClearCv,       nullptr);
-  g_clear_trig_item   = new seq::ActionItem("Clear Trig", &ActionClearTriggers, nullptr);
+  g_clear_cv_item     = new seq::ActionItem(
+      "Clear CV",   &ActionClearCv,       nullptr,
+      /*confirm=*/true, "Clear all CVs?");
+  g_clear_trig_item   = new seq::ActionItem(
+      "Clear Trig", &ActionClearTriggers, nullptr,
+      /*confirm=*/true, "Clear all trigs?");
   g_cv_source_item    = new seq::GridSelectItem(
       "CV Source", kCvSourceNames, kCvSourceCount, 0,
       /*cols=*/3);
