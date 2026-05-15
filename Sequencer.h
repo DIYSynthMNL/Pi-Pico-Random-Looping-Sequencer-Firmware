@@ -54,18 +54,23 @@ class Sequencer {
   const Voice& voice(int i) const { return voices_[i]; }
   static constexpr int voice_count() { return kVoiceCount; }
 
-  // Measured clock gate width (rising→falling). Floored to
-  // kMinClockMsForTrig at use-time in Voice::Advance.
-  uint32_t clock_gate_ms() const { return clock_ms_; }
+  // Measured clock period (rising-to-rising). Used for both trigger-
+  // length calculation and clock-multiplier sub-edge spacing. Floored
+  // to kMinClockMsForTrig at use-time in Voice::Advance.
+  uint32_t clock_period_ms() const { return clock_period_ms_; }
 
  private:
   Voice           voices_[kVoiceCount];
   SequencerParams params_{};
 
-  // Clock edge debounce + gate-width measurement.
+  // Clock edge debounce + period measurement (rising-to-rising).
+  // Note: in v0.5.1 this field measured *gate width* (rising-to-falling),
+  // which caused the multiplier to cluster sub-edges in the high half of
+  // a 50%-duty square clock instead of spacing them across the period.
   bool      step_changed_on_clock_pulse_ = false;
-  uint32_t  previous_clock_ticks_        = 0;
-  uint32_t  clock_ms_                    = kDefaultClockMs;
+  bool      have_clock_period_           = false;
+  uint32_t  last_rising_ms_              = 0;
+  uint32_t  clock_period_ms_             = kDefaultClockMs;
 
   // Per-voice edge counter — increments on each accepted (external + sub-)
   // edge. Voice advances when counter % divider == 0. The clock multiplier
