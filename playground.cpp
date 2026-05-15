@@ -1400,7 +1400,7 @@ static void RenderOledWidget() {
     g_views.Draw(g_oled);
   }
   ImGui::SetNextWindowPos (ImVec2(10, 30),  ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSize(ImVec2(710, 420), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(440, 350), ImGuiCond_FirstUseEver);
   ImGui::Begin("OLED 128x64");
   // Tiny status banner — what view are we looking at?
   const int depth = g_views.depth();
@@ -1414,7 +1414,7 @@ static void RenderOledWidget() {
 
   ImDrawList* dl = ImGui::GetWindowDrawList();
   // Bezel — a slightly larger rounded rect framing the OLED.
-  const float scale  = 5.0f;
+  const float scale  = 3.0f;
   const float bezel  = 8.0f;
   ImVec2 cursor      = ImGui::GetCursorScreenPos();
   ImVec2 bz_p0(cursor.x, cursor.y);
