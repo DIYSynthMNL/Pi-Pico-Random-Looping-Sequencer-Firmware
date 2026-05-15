@@ -62,6 +62,7 @@ struct FakeOled {
     static constexpr uint8_t k_percent[6] = {0x42,0x21,0x10,0x08,0x44,0x42};
     static constexpr uint8_t k_aster  [6] = {0x00,0x14,0x08,0x14,0x00,0x00};
     static constexpr uint8_t k_comma  [6] = {0x00,0x00,0x40,0x30,0x00,0x00};
+    static constexpr uint8_t k_hash   [6] = {0x14,0x7F,0x14,0x7F,0x14,0x00};
     // Digits 0-9
     static constexpr uint8_t k_0[6] = {0x3E,0x51,0x49,0x45,0x3E,0x00};
     static constexpr uint8_t k_1[6] = {0x00,0x42,0x7F,0x40,0x00,0x00};
@@ -111,6 +112,7 @@ struct FakeOled {
       case '%': return k_percent;
       case '*': return k_aster;
       case ',': return k_comma;
+      case '#': return k_hash;
       case '0': return k_0; case '1': return k_1; case '2': return k_2;
       case '3': return k_3; case '4': return k_4; case '5': return k_5;
       case '6': return k_6; case '7': return k_7; case '8': return k_8;
