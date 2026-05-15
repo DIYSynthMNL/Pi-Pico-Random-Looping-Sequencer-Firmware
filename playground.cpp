@@ -290,14 +290,21 @@ struct Icon6x8 { uint8_t cols[6]; };
 
 constexpr Icon6x8 kPlay    = {{0xFF, 0x7E, 0x3C, 0x18, 0x00, 0x00}};  // right-pointing triangle
 constexpr Icon6x8 kStop    = {{0x00, 0x7E, 0x7E, 0x7E, 0x7E, 0x00}};  // filled square
-[[maybe_unused]] constexpr Icon6x8 kPause   = {{0x00, 0x7E, 0x7E, 0x00, 0x7E, 0x7E}};
+constexpr Icon6x8 kPause   = {{0x00, 0x7E, 0x7E, 0x00, 0x7E, 0x7E}};
 [[maybe_unused]] constexpr Icon6x8 kNote    = {{0x00, 0x30, 0xFF, 0x00, 0x18, 0x1C}};
 constexpr Icon6x8 kTrig    = {{0xFF, 0x03, 0x03, 0xFF, 0x80, 0x80}};  // pulse shape
 [[maybe_unused]] constexpr Icon6x8 kDice    = {{0x7E, 0x49, 0x65, 0x49, 0x7E, 0x00}};
-[[maybe_unused]] constexpr Icon6x8 kReset   = {{0x3C, 0x42, 0x81, 0x81, 0x42, 0x18}};
+constexpr Icon6x8 kReset   = {{0x3C, 0x42, 0x81, 0x81, 0x42, 0x18}};
 [[maybe_unused]] constexpr Icon6x8 kLoop    = {{0x3C, 0x42, 0x81, 0x91, 0x42, 0x3C}};
 [[maybe_unused]] constexpr Icon6x8 kArrowUp = {{0x08, 0x0C, 0xFE, 0xFE, 0x0C, 0x08}};
 [[maybe_unused]] constexpr Icon6x8 kArrowDn = {{0x10, 0x30, 0x7F, 0x7F, 0x30, 0x10}};
+// Direction indicators — column-major 6 bytes, rows 0..7 LSB first.
+// kArrowR/kArrowL = single chevron; kPendulum = two chevrons back-to-back;
+// kDiceQ = "?" for random.
+constexpr Icon6x8 kArrowR  = {{0x18, 0x3C, 0x7E, 0xFF, 0x18, 0x18}};
+constexpr Icon6x8 kArrowL  = {{0x18, 0x18, 0xFF, 0x7E, 0x3C, 0x18}};
+constexpr Icon6x8 kPendulum= {{0x18, 0xFF, 0x7E, 0x7E, 0xFF, 0x18}};
+constexpr Icon6x8 kDiceQ   = {{0x00, 0x06, 0x01, 0xB1, 0x0E, 0x00}};
 
 static void Draw(seq::FakeOled& oled, const Icon6x8& icon,
                  int x, int y, bool on = true) {
@@ -318,18 +325,30 @@ static void Draw(seq::FakeOled& oled, const Icon6x8& icon,
 // list on top of it; long-press cycles between playback layouts.
 class PlaybackView : public seq::View {
  public:
-  enum class Layout : uint8_t { Grid = 0, PianoRoll = 1, Count = 2 };
+  enum class Layout : uint8_t {
+    Grid      = 0,
+    PianoRoll = 1,
+    Scope     = 2,
+    Card      = 3,
+    Overview  = 4,
+    Count     = 5
+  };
 
   void Draw(seq::FakeOled& oled) const override {
     oled.Clear();   // critical — without this, previous frames' pixels
                     // (especially the menu's, after popping back) bleed
                     // through and ghost the playback view.
+    UpdateTrailAndScope();
     DrawHeader(oled);
     switch (layout_) {
       case Layout::PianoRoll: DrawPianoRoll(oled); break;
+      case Layout::Scope:     DrawScope(oled);     break;
+      case Layout::Card:      DrawCard(oled);      break;
+      case Layout::Overview:  DrawOverview(oled);  break;
       case Layout::Grid:
       default:                DrawGrid(oled);      break;
     }
+    DrawIdleOverlay(oled);
     DrawLayoutHint(oled);
   }
 
@@ -362,6 +381,35 @@ class PlaybackView : public seq::View {
   mutable bool     last_trig_seen_        = false;
   mutable uint32_t trig_pulse_started_ms_ = 0;
 
+  // Trail of recently played step indices — used by Grid + PianoRoll
+  // to visualise pendulum/random movement. Newest first. -1 = empty.
+  static constexpr int kTrailLen = 4;
+  mutable int trail_[kTrailLen] = { -1, -1, -1, -1 };
+
+  // Rolling CV history for the Scope layout. Sampled once per step
+  // change. Newest at scope_head_; we render right-to-left from there.
+  static constexpr int kScopeLen = 64;
+  mutable uint16_t scope_cv_[kScopeLen]   = {0};
+  mutable uint8_t  scope_trig_[kScopeLen] = {0};
+  mutable int      scope_head_            = 0;
+  mutable int      scope_filled_          = 0;
+
+  // Called once per Draw — pushes step into trail/scope buffers if the
+  // playhead has advanced. Keeping this in one place means every layout
+  // sees a consistent snapshot.
+  void UpdateTrailAndScope() const {
+    const int step = g_disp_step.load();
+    if (step == last_step_seen_) return;
+    // Shift trail right, prepend current.
+    for (int i = kTrailLen - 1; i > 0; --i) trail_[i] = trail_[i - 1];
+    trail_[0] = step;
+    // Scope: push current CV + trig.
+    scope_cv_[scope_head_]   = g_disp_dac.load();
+    scope_trig_[scope_head_] = g_disp_trig.load() ? 1 : 0;
+    scope_head_ = (scope_head_ + 1) % kScopeLen;
+    if (scope_filled_ < kScopeLen) ++scope_filled_;
+  }
+
   void DrawHeader(seq::FakeOled& oled) const {
     const int  step  = g_disp_step.load();
     const int  steps = g_steps_item ? g_steps_item->value() : 16;
@@ -379,9 +427,26 @@ class PlaybackView : public seq::View {
     // Play/Stop icon at the far left, then text.
     icons::Draw(oled, run ? icons::kPlay : icons::kStop, 1, 1);
     char header[24];
-    std::snprintf(header, sizeof(header), " %-3s %-7s %02d/%02d",
+    std::snprintf(header, sizeof(header), " %-3s %-6s %02d/%02d",
                   now_note, scale_short, step + 1, steps);
     oled.Text(8, 1, header);
+
+    // Direction indicator just to the left of the trig area. Picks an
+    // icon based on the current step direction so pendulum/random are
+    // distinguishable from forward/reverse at a glance.
+    if (g_step_dir_item) {
+      const auto dir = static_cast<seq::StepDirection>(
+          g_step_dir_item->selected_index());
+      const icons::Icon6x8* dico = &icons::kArrowR;
+      switch (dir) {
+        case seq::StepDirection::Reverse:  dico = &icons::kArrowL;  break;
+        case seq::StepDirection::Pendulum: dico = &icons::kPendulum;break;
+        case seq::StepDirection::Random:   dico = &icons::kDiceQ;   break;
+        case seq::StepDirection::Forward:
+        default:                           dico = &icons::kArrowR;  break;
+      }
+      icons::Draw(oled, *dico, 112, 1);
+    }
 
     // Live trig indicator on the right edge if the gate is high.
     // On the rising edge (transition off → on) we kick off a brief
@@ -430,11 +495,38 @@ class PlaybackView : public seq::View {
     constexpr int kCellH   = 26;
     constexpr int kGridTop = 11;
 
-    for (int i = 0; i < seq::kMaxSteps; ++i) {
+    auto cell_xy = [&](int i, int& cx, int& cy) {
       const int col = i % 8;
       const int row = i / 8;
-      const int x   = col * kCellW;
-      const int y   = kGridTop + row * kCellH;
+      cx = col * kCellW;
+      cy = kGridTop + row * kCellH;
+    };
+
+    // Trail: draw dotted outlines for previously-played steps (skipping
+    // index 0 which IS the current step). Pattern thickens for the most
+    // recent. Mostly visible in Pendulum/Random; in Forward it just
+    // reads as a "where we came from" tail behind the playhead.
+    for (int t = 1; t < kTrailLen; ++t) {
+      const int idx = trail_[t];
+      if (idx < 0 || idx >= steps) continue;
+      if (idx == step) continue;   // don't ghost under the playhead
+      int x, y;
+      cell_xy(idx, x, y);
+      // Dotted outline — step every (t+1) px so older trails are sparser.
+      const int stride = 1 + t;
+      for (int dx = 0; dx < kCellW; dx += stride) {
+        oled.Px(x + dx, y, true);
+        oled.Px(x + dx, y + kCellH - 1, true);
+      }
+      for (int dy = 0; dy < kCellH; dy += stride) {
+        oled.Px(x, y + dy, true);
+        oled.Px(x + kCellW - 1, y + dy, true);
+      }
+    }
+
+    for (int i = 0; i < seq::kMaxSteps; ++i) {
+      int x, y;
+      cell_xy(i, x, y);
       const bool active = (i < steps);
       const bool trig   = g_disp_trig_grid[i] != 0;
       const bool is_cur = (i == step);
@@ -515,6 +607,21 @@ class PlaybackView : public seq::View {
     const int cx = x_for(step);
     for (int y = kGraphTop; y < kTrigY + kTrigSize; y += 2) oled.Px(cx, y, true);
 
+    // Trail ghosts — small marker rings on previously played step
+    // positions, sparser the further back. Sells pendulum/random by
+    // showing the path the playhead took.
+    for (int t = 1; t < kTrailLen; ++t) {
+      const int idx = trail_[t];
+      if (idx < 0 || idx >= steps) continue;
+      if (idx == step) continue;
+      const int tx = x_for(idx);
+      const int ty = y_for(g_disp_cv[idx]);
+      if (t == 1)      oled.Rect(tx - 2, ty - 2, 5, 5);
+      else if (t == 2) { oled.Px(tx - 2, ty, true); oled.Px(tx + 2, ty, true);
+                         oled.Px(tx, ty - 2, true); oled.Px(tx, ty + 2, true); }
+      else              oled.Px(tx, ty, true);
+    }
+
     // Pitch contour line — connect consecutive steps.
     for (int i = 0; i < steps; ++i) {
       const int x = x_for(i);
@@ -558,6 +665,192 @@ class PlaybackView : public seq::View {
     // Bottom-right = low range, just above the trig row
     oled.FillRect(128 - min_w - 1, kGraphBot - 8, min_w + 1, 8, false);
     oled.Text   (128 - min_w,     kGraphBot - 8, nmin, true);
+  }
+
+  // ---- Layout 2: scope — rolling CV waveform over time ----
+  // Time flows left → right; newest sample on the right. Auto-scales Y
+  // to the recorded range so a tight melody still fills the screen.
+  // Trig events render as tick marks along the bottom rail.
+  void DrawScope(seq::FakeOled& oled) const {
+    constexpr int kTop  = 12;
+    constexpr int kBot  = 52;
+    constexpr int kTickY = 56;
+    if (scope_filled_ <= 0) {
+      oled.Text(20, 28, "waiting for clock");
+      return;
+    }
+    // Find min/max over the filled region.
+    uint16_t lo = 4095, hi = 0;
+    for (int n = 0; n < scope_filled_; ++n) {
+      const int idx = (scope_head_ - 1 - n + kScopeLen) % kScopeLen;
+      if (scope_cv_[idx] < lo) lo = scope_cv_[idx];
+      if (scope_cv_[idx] > hi) hi = scope_cv_[idx];
+    }
+    if (hi <= lo) hi = lo + 1;
+    const int kH = kBot - kTop;
+    auto y_for = [&](uint16_t cv) {
+      return kBot - static_cast<int>(
+          (static_cast<int32_t>(cv - lo) * kH) / (hi - lo));
+    };
+    // Plot newest at x=127, walking left. Connect consecutive samples.
+    int prev_x = -1, prev_y = -1;
+    const int x_step = 2;   // 2 px per sample → 64 samples = 128 px
+    for (int n = 0; n < scope_filled_; ++n) {
+      const int idx = (scope_head_ - 1 - n + kScopeLen) % kScopeLen;
+      const int x   = 127 - n * x_step;
+      if (x < 0) break;
+      const int y = y_for(scope_cv_[idx]);
+      if (prev_x >= 0) oled.Line(x, y, prev_x, prev_y);
+      oled.FillRect(x - 1, y - 1, 2, 2, true);
+      if (scope_trig_[idx]) {
+        oled.Px(x,     kTickY,     true);
+        oled.Px(x,     kTickY + 1, true);
+        oled.Px(x - 1, kTickY + 1, true);
+        oled.Px(x + 1, kTickY + 1, true);
+      }
+      prev_x = x; prev_y = y;
+    }
+    // Newest-sample marker on the right rail.
+    oled.Line(127, kTop, 127, kBot);
+    // Min/max labels on the left margin.
+    char nmin[8], nmax[8];
+    DacToNoteName(lo, nmin, sizeof(nmin));
+    DacToNoteName(hi, nmax, sizeof(nmax));
+    oled.FillRect(0, kTop, static_cast<int>(std::strlen(nmax)) * 6, 8, false);
+    oled.Text(0, kTop, nmax);
+    oled.FillRect(0, kBot - 8, static_cast<int>(std::strlen(nmin)) * 6, 8, false);
+    oled.Text(0, kBot - 8, nmin);
+  }
+
+  // ---- Layout 3: card — dense "now-playing" summary ----
+  // Large note name, BPM, scale + section, direction, step rate, step
+  // counter, trig length. The reading screen — nothing animates per step
+  // except the playhead bar at the bottom.
+  void DrawCard(seq::FakeOled& oled) const {
+    constexpr int kBigY = 14;
+    char now_note[8];
+    DacToNoteName(g_disp_dac.load(), now_note, sizeof(now_note));
+    // Big note name — render glyphs 2x by stamping each pixel of the
+    // 1x text into a 2x2 block on the real oled.
+    {
+      seq::FakeOled tmp;
+      tmp.Clear();
+      tmp.Text(0, 0, now_note);
+      const int big_w = static_cast<int>(std::strlen(now_note)) * 6;
+      const int ox = 4;
+      const int oy = kBigY;
+      for (int px = 0; px < big_w; ++px) {
+        for (int py = 0; py < 8; ++py) {
+          if (tmp.buf[py * seq::FakeOled::kW + px]) {
+            oled.FillRect(ox + px * 2, oy + py * 2, 2, 2, true);
+          }
+        }
+      }
+    }
+    // Right column: BPM big-ish.
+    {
+      char bpm_buf[12];
+      std::snprintf(bpm_buf, sizeof(bpm_buf), "%d", g_bpm.load());
+      const int bw = static_cast<int>(std::strlen(bpm_buf)) * 6;
+      oled.Text(127 - bw, kBigY,     bpm_buf);
+      oled.Text(127 - 18, kBigY + 8, "BPM");
+    }
+    // Middle: scale section + name.
+    const char* scale = (g_scale_idx >= 0 && g_scale_idx < seq::kNumScales)
+                        ? seq::kScales[g_scale_idx].name : "";
+    const char* sect_name = (g_scale_idx >= 0)
+                            ? seq::ScaleSectionForIndex(g_scale_idx) : "";
+    char scale_line[32];
+    std::snprintf(scale_line, sizeof(scale_line), "%-7s %s", sect_name, scale);
+    oled.Text(0, 36, scale_line);
+    // Bottom row: step rate label + step counter + direction icon.
+    const int steps = g_steps_item ? g_steps_item->value() : 16;
+    const int step  = g_disp_step.load();
+    char foot[24];
+    const char* rate = (g_step_rate_item) ?
+        kStepRateNames[g_step_rate_item->selected_index()] : "x1";
+    std::snprintf(foot, sizeof(foot), "%-3s  %02d/%02d", rate, step + 1, steps);
+    oled.Text(0, 46, foot);
+    // Step progress bar bottom.
+    const int bar_w = (steps > 0)
+        ? (128 * (step + 1)) / steps : 0;
+    oled.Rect(0, 60, 128, 4);
+    oled.FillRect(0, 60, bar_w, 4, true);
+  }
+
+  // ---- Layout 4: overview — zoomed-out step strip ----
+  // 16 step cells, each shows CV height (vertical bar) + trig marker.
+  // No playhead clutter — just the pattern shape. Current step gets a
+  // small caret above it.
+  void DrawOverview(seq::FakeOled& oled) const {
+    const int  steps = g_steps_item ? g_steps_item->value() : 16;
+    const int  step  = g_disp_step.load();
+    if (steps <= 0) return;
+    constexpr int kTop  = 14;
+    constexpr int kBot  = 50;
+    constexpr int kTrigY = 53;
+    constexpr int kH    = kBot - kTop;
+    // Find pitch range.
+    uint16_t lo = 4095, hi = 0;
+    for (int i = 0; i < steps; ++i) {
+      if (g_disp_cv[i] < lo) lo = g_disp_cv[i];
+      if (g_disp_cv[i] > hi) hi = g_disp_cv[i];
+    }
+    if (hi <= lo) hi = lo + 1;
+    const int cell_w = 128 / steps;
+    for (int i = 0; i < steps; ++i) {
+      const int x = i * cell_w;
+      const int h = static_cast<int>(
+          (static_cast<int32_t>(g_disp_cv[i] - lo) * kH) / (hi - lo));
+      // Bar from bottom up to height h.
+      const int by = kBot - h;
+      const bool is_cur = (i == step);
+      if (is_cur) {
+        oled.FillRect(x, by, cell_w - 1, h + 1, true);
+      } else {
+        oled.Rect(x, by, cell_w - 1, h + 1);
+      }
+      // Trig: filled square below if on, hollow if off.
+      const int tx = x + (cell_w - 3) / 2;
+      if (g_disp_trig_grid[i]) {
+        oled.FillRect(tx, kTrigY, 3, 3, true);
+      } else {
+        oled.Px(tx + 1, kTrigY + 1, true);
+      }
+      // Caret above the current step.
+      if (is_cur) {
+        const int cx = x + (cell_w - 1) / 2;
+        oled.Px(cx,     kTop - 2, true);
+        oled.Px(cx - 1, kTop - 1, true);
+        oled.Px(cx,     kTop - 1, true);
+        oled.Px(cx + 1, kTop - 1, true);
+      }
+    }
+    // Pitch range labels at the right margin.
+    char nmin[8], nmax[8];
+    DacToNoteName(lo, nmin, sizeof(nmin));
+    DacToNoteName(hi, nmax, sizeof(nmax));
+    const int min_w = static_cast<int>(std::strlen(nmin)) * 6;
+    const int max_w = static_cast<int>(std::strlen(nmax)) * 6;
+    oled.FillRect(128 - max_w, kTop,     max_w, 8, false);
+    oled.Text   (128 - max_w, kTop,     nmax);
+    oled.FillRect(128 - min_w, kBot - 8, min_w, 8, false);
+    oled.Text   (128 - min_w, kBot - 8, nmin);
+  }
+
+  // ---- Idle overlay — soft "paused" hint when not running ----
+  // Subtle: a pause icon + breathing dot near top-right. Doesn't replace
+  // the layout — you still see your pattern, just dimmed-feeling.
+  void DrawIdleOverlay(seq::FakeOled& oled) const {
+    const bool run = g_run_item ? g_run_item->value() : false;
+    if (run) return;
+    // Pause glyph just left of the trig area. Breathing brightness via
+    // intermittent pixel — we don't have alpha so a slow blink suffices.
+    const uint32_t ms = NowMs();
+    const bool show = ((ms / 500) & 1) == 0;
+    if (show) {
+      icons::Draw(oled, icons::kPause, 100, 1);
+    }
   }
 };
 
