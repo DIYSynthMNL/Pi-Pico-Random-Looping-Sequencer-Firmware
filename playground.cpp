@@ -198,6 +198,14 @@ static void DoTapTempo();
 // list views which exist in this file lower down). PlaybackView's
 // OnPress wants to push the main view — go through this trampoline.
 static seq::View* MainView();
+
+// Milliseconds since the steady-clock epoch. Used by views that want
+// to animate (step pulse halo, trig flash, etc.).
+static uint32_t NowMs() {
+  return static_cast<uint32_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count());
+}
 // MainMenuView::OnPress toggles g_run_item directly (it's already
 // under the mutex from DoEncoderPress) and then fires OnMenuCommit
 // to sync into engine params — declared below, used above.
@@ -337,6 +345,11 @@ class PlaybackView : public seq::View {
  private:
   Layout      layout_                = Layout::Grid;
   mutable int hint_frames_remaining_ = 0;
+  // Animation state — driven by NowMs() comparisons in Draw.
+  mutable int      last_step_seen_       = -1;
+  mutable uint32_t step_pulse_started_ms_ = 0;
+  mutable bool     last_trig_seen_        = false;
+  mutable uint32_t trig_pulse_started_ms_ = 0;
 
   void DrawHeader(seq::FakeOled& oled) const {
     const int  step  = g_disp_step.load();
@@ -360,8 +373,20 @@ class PlaybackView : public seq::View {
     oled.Text(8, 1, header);
 
     // Live trig indicator on the right edge if the gate is high.
-    if (g_disp_trig.load()) {
+    // On the rising edge (transition off → on) we kick off a brief
+    // outline flash around the icon so a fast gate is still visible.
+    const bool trig = g_disp_trig.load();
+    if (trig && !last_trig_seen_) {
+      trig_pulse_started_ms_ = NowMs();
+    }
+    last_trig_seen_ = trig;
+    if (trig) {
       icons::Draw(oled, icons::kTrig, 121, 1);
+      const uint32_t age = NowMs() - trig_pulse_started_ms_;
+      if (age < 80) {
+        // Outline 1 px outside the icon, fades after ~80 ms.
+        oled.Rect(119, -1, 9, 11);
+      }
     }
   }
 
@@ -383,6 +408,13 @@ class PlaybackView : public seq::View {
     const int  step  = g_disp_step.load();
     const int  steps = g_steps_item ? g_steps_item->value() : 16;
 
+    // Detect step advance — used for the pulse halo below.
+    if (step != last_step_seen_) {
+      step_pulse_started_ms_ = NowMs();
+      last_step_seen_ = step;
+    }
+    const uint32_t pulse_age = NowMs() - step_pulse_started_ms_;
+
     constexpr int kCellW   = 16;
     constexpr int kCellH   = 26;
     constexpr int kGridTop = 11;
@@ -400,7 +432,19 @@ class PlaybackView : public seq::View {
         oled.Px(x + kCellW / 2, y + kCellH / 2, true);
         continue;
       }
-      if (is_cur) oled.FillRect(x, y, kCellW, kCellH, true);
+      if (is_cur) {
+        oled.FillRect(x, y, kCellW, kCellH, true);
+        // Pulse halo — expanding outline that fades in 150 ms after a
+        // step change. Gives the playhead an "alive" feel.
+        if (pulse_age < 150) {
+          const int outset = (pulse_age < 50) ? 2 :
+                             (pulse_age < 100) ? 1 : 0;
+          if (outset > 0) {
+            oled.Rect(x - outset, y - outset,
+                      kCellW + outset * 2, kCellH + outset * 2);
+          }
+        }
+      }
 
       char note_full[8];
       DacToNoteName(g_disp_cv[i], note_full, sizeof(note_full));
@@ -488,13 +532,21 @@ class PlaybackView : public seq::View {
       }
     }
 
-    // Min/Max note labels on the right edge so you know the range.
+    // Tiny min/max note labels in the right margin so you can read
+    // the y-axis range of the contour. Drawn over the rightmost step
+    // — at 16 steps × 8 px each = 128 px there's no clean margin, so
+    // we paint a thin dark strip first.
     char nmin[8], nmax[8];
     DacToNoteName(cv_min, nmin, sizeof(nmin));
     DacToNoteName(cv_max, nmax, sizeof(nmax));
-    // (omitted — limited horizontal space; piano roll's strength is
-    // the contour itself, and the header already shows the current note.)
-    (void)nmin; (void)nmax;
+    const int min_w = static_cast<int>(std::strlen(nmin)) * 6;
+    const int max_w = static_cast<int>(std::strlen(nmax)) * 6;
+    // Top-right = high range
+    oled.FillRect(128 - max_w - 1, kGraphTop, max_w + 1, 8, false);
+    oled.Text   (128 - max_w,     kGraphTop, nmax, true);
+    // Bottom-right = low range, just above the trig row
+    oled.FillRect(128 - min_w - 1, kGraphBot - 8, min_w + 1, 8, false);
+    oled.Text   (128 - min_w,     kGraphBot - 8, nmin, true);
   }
 };
 
