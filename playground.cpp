@@ -947,12 +947,69 @@ static void DoBack() {
 }
 
 // ============================================================
-//  Controls window — direct navigation + hardware-encoder mirror
+//  Hardware window — buttons that mirror real-panel controls
 // ============================================================
-static void RenderEncoderInputsWindow() {
-  ImGui::Begin("Controls");
+// This is the "would exist on the eventual Eurorack module" surface:
+// encoder rotate/click/long-press, manual clock-in, digital-in,
+// reset jack. Use this view to feel out the hardware UX. Anything
+// here will match the physical module.
+static void RenderHardwareWindow() {
+  ImGui::Begin("Hardware (mirror)");
 
-  // ---- Direct navigation (sim-only — no hardware-encoder dance) ----
+  ImGui::SeparatorText("Encoder");
+  if (ImGui::Button("<<  rotate left",  ImVec2(140, 0))) DoEncoderRotate(-1);
+  ImGui::SameLine();
+  if (ImGui::Button("CLICK",            ImVec2(80, 0)))  DoEncoderPress();
+  ImGui::SameLine();
+  if (ImGui::Button("rotate right  >>", ImVec2(140, 0))) DoEncoderRotate(+1);
+  if (ImGui::Button("LONG PRESS (back / cancel)", ImVec2(0, 0))) DoEncoderLongPress();
+
+  ImGui::SeparatorText("Jacks");
+  if (ImGui::Button("Manual clock pulse (G)"))  g_manual_pulse_request.store(true);
+  ImGui::SameLine();
+  if (ImGui::Button("Digital-in pulse (D)"))    g_digital_pulse_request.store(true);
+  ImGui::SameLine();
+  if (ImGui::Button("RESET (R)"))               g_reset_request.store(true);
+
+  ImGui::SeparatorText("Keyboard reference");
+  ImGui::BeginTable("keys", 2, ImGuiTableFlags_SizingFixedFit);
+  auto row = [](const char* k, const char* v) {
+    ImGui::TableNextRow();
+    ImGui::TableNextColumn(); ImGui::TextColored(ImVec4(0.8f, 0.9f, 1.0f, 1.0f), "%s", k);
+    ImGui::TableNextColumn(); ImGui::Text("%s", v);
+  };
+  row("Left / Right", "Encoder rotate");
+  row("Space",        "Encoder click");
+  row("Backspace",    "Long-press / cancel / back");
+  row("G",            "Manual clock pulse");
+  row("D",            "Digital-in pulse");
+  row("R",            "Reset transport");
+  row("S",            "Toggle internal clock  (sim-only)");
+  row("V",            "Cycle playback layout  (sim-only)");
+  row("M",            "Open main menu         (sim-only)");
+  row("H",            "Home                   (sim-only)");
+  row("1 .. 9",       "Jump to menu item N");
+  row("Esc / Q",      "Quit");
+  ImGui::EndTable();
+
+  ImGui::End();
+}
+
+// ============================================================
+//  Quick Nav window — sim-only navigation shortcuts
+// ============================================================
+// Direct buttons for things you'd otherwise have to encoder-dance for.
+// None of these will exist on the physical module — they're here so
+// the sim is comfortable to operate with a mouse. The OLED menu (driven
+// by the Hardware window's encoder mirror) is still the canonical edit
+// surface, and the same actions are reachable that way.
+static void RenderQuickNavWindow() {
+  ImGui::Begin("Quick Nav (sim only)");
+
+  ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
+                     "Sim shortcuts — not on hardware.");
+  ImGui::Separator();
+
   ImGui::SeparatorText("Navigation");
   if (ImGui::Button("MENU (M)", ImVec2(120, 30))) DoOpenMainMenu();
   ImGui::SameLine();
@@ -969,25 +1026,9 @@ static void RenderEncoderInputsWindow() {
   ImGui::SameLine();
   if (ImGui::Button("Actions", ImVec2(80, 0))) DoOpenSubmenu(&g_actions_menu);
 
-  // ---- Encoder (hardware mirror) ----
-  ImGui::SeparatorText("Encoder (mirrors hardware)");
-  if (ImGui::Button("<<  rotate left",  ImVec2(140, 0))) DoEncoderRotate(-1);
-  ImGui::SameLine();
-  if (ImGui::Button("CLICK",            ImVec2(80, 0)))  DoEncoderPress();
-  ImGui::SameLine();
-  if (ImGui::Button("rotate right  >>", ImVec2(140, 0))) DoEncoderRotate(+1);
-  if (ImGui::Button("LONG PRESS (back / cancel)", ImVec2(0, 0))) DoEncoderLongPress();
+  ImGui::SeparatorText("Playback");
   if (ImGui::Button("Cycle playback layout (V)", ImVec2(0, 0))) DoCyclePlaybackLayout();
 
-  // ---- Jacks (mirror what's physically wired on the panel) ----
-  ImGui::SeparatorText("Jacks");
-  if (ImGui::Button("Manual clock pulse"))  g_manual_pulse_request.store(true);
-  ImGui::SameLine();
-  if (ImGui::Button("Digital-in pulse"))    g_digital_pulse_request.store(true);
-  ImGui::SameLine();
-  if (ImGui::Button("RESET"))               g_reset_request.store(true);
-
-  // ---- Menu jumps (1..9) ----
   ImGui::SeparatorText("Menu shortcuts (only when a menu is on top)");
   const bool in_menu = (TopMenuList() != nullptr);
   if (!in_menu) ImGui::BeginDisabled();
@@ -997,28 +1038,6 @@ static void RenderEncoderInputsWindow() {
     if (ImGui::Button(lbl, ImVec2(28, 0))) DoMenuJump(i - 1);
   }
   if (!in_menu) ImGui::EndDisabled();
-
-  // ---- Keyboard reference ----
-  ImGui::SeparatorText("Keyboard reference");
-  ImGui::BeginTable("keys", 2, ImGuiTableFlags_SizingFixedFit);
-  auto row = [](const char* k, const char* v) {
-    ImGui::TableNextRow();
-    ImGui::TableNextColumn(); ImGui::TextColored(ImVec4(0.8f, 0.9f, 1.0f, 1.0f), "%s", k);
-    ImGui::TableNextColumn(); ImGui::Text("%s", v);
-  };
-  row("Left / Right", "Encoder rotate");
-  row("Space",        "Encoder click");
-  row("Backspace",    "Long-press / cancel / back");
-  row("G",            "Manual clock pulse");
-  row("D",            "Digital-in pulse");
-  row("S",            "Toggle internal clock");
-  row("R",            "Reset transport");
-  row("V",            "Cycle playback layout (Grid / Piano Roll)");
-  row("M",            "Open main menu");
-  row("H",            "Home — return to playback view");
-  row("1 .. 9",       "Jump to menu item N");
-  row("Esc / Q",      "Quit");
-  ImGui::EndTable();
 
   ImGui::End();
 }
@@ -1198,7 +1217,8 @@ int main() {
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
     RenderOledWidget();
-    RenderEncoderInputsWindow();
+    RenderHardwareWindow();
+    RenderQuickNavWindow();
     RenderSimWindow();
     RenderInspectorWindow();
     ImGui::Render();
