@@ -225,6 +225,9 @@ class PlaybackView : public seq::View {
   enum class Layout : uint8_t { Grid = 0, PianoRoll = 1, Count = 2 };
 
   void Draw(seq::FakeOled& oled) const override {
+    oled.Clear();   // critical — without this, previous frames' pixels
+                    // (especially the menu's, after popping back) bleed
+                    // through and ghost the playback view.
     DrawHeader(oled);
     switch (layout_) {
       case Layout::PianoRoll: DrawPianoRoll(oled); break;
@@ -242,12 +245,17 @@ class PlaybackView : public seq::View {
   // Long-press at the root cycles through playback layouts (instead of
   // the default View::OnLongPress, which pops the stack — a no-op at
   // depth 1 anyway).
-  void OnLongPress() override {
+  void OnLongPress() override { CycleLayout(); }
+
+  // Exposed so the keyboard handler / Encoder & Inputs window can also
+  // cycle layouts without going through the long-press path.
+  void CycleLayout() {
     layout_ = static_cast<Layout>(
         (static_cast<uint8_t>(layout_) + 1u) %
         static_cast<uint8_t>(Layout::Count));
     hint_frames_remaining_ = 60;   // ~1 s at 60 fps
   }
+  Layout layout() const { return layout_; }
 
  private:
   Layout      layout_                = Layout::Grid;
@@ -912,6 +920,10 @@ static void DoMenuJump(int index) {
   std::lock_guard<std::mutex> lk(g_mutex);
   if (g_views.top() == &g_menu_view) g_menu_view.JumpTo(index);
 }
+static void DoCyclePlaybackLayout() {
+  std::lock_guard<std::mutex> lk(g_mutex);
+  g_playback_view.CycleLayout();
+}
 
 // ============================================================
 //  Encoder & Inputs window — clickable mirror of the keyboard
@@ -927,6 +939,7 @@ static void RenderEncoderInputsWindow() {
   ImGui::SameLine();
   if (ImGui::Button("rotate right  >>", ImVec2(140, 0))) DoEncoderRotate(+1);
   if (ImGui::Button("LONG PRESS (back / cancel)", ImVec2(0, 0))) DoEncoderLongPress();
+  if (ImGui::Button("Cycle playback layout (V)", ImVec2(0, 0))) DoCyclePlaybackLayout();
 
   // ---- Transport / inputs ----
   ImGui::SeparatorText("Transport & jacks");
@@ -967,6 +980,7 @@ static void RenderEncoderInputsWindow() {
   row("D",            "Digital-in pulse");
   row("S",            "Toggle internal clock");
   row("R",            "Reset transport");
+  row("V",            "Cycle playback layout (Grid / Piano Roll)");
   row("1 .. 9",       "Jump to menu item N");
   row("Esc / Q",      "Quit");
   ImGui::EndTable();
@@ -1006,6 +1020,9 @@ static void OnKey(GLFWwindow* win, int key, int /*sc*/, int action, int /*mods*/
       break;
     case GLFW_KEY_R:
       if (action == GLFW_PRESS) g_reset_request.store(true);
+      break;
+    case GLFW_KEY_V:
+      if (action == GLFW_PRESS) DoCyclePlaybackLayout();
       break;
     case GLFW_KEY_ESCAPE:
     case GLFW_KEY_Q:
