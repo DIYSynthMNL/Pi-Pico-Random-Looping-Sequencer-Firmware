@@ -184,6 +184,12 @@ bool g_show_params     = true;
 bool g_show_sim        = true;
 bool g_show_inspector  = true;
 
+// Tap-tempo feedback timestamp. NowMs() < g_tap_flash_until_ms_ means
+// the BPM slider in the Sim window should flash. Written by DoTapTempo,
+// read by RenderSimWindow.
+std::atomic<uint32_t> g_tap_flash_until_ms_{0};
+std::atomic<uint32_t> g_last_tap_ms_{0};
+
 }  // namespace
 
 // ============================================================
@@ -757,14 +763,26 @@ class MainMenuView : public seq::View {
       &icons::kDice,    // Probs — dice
       &icons::kTrig,    // Actions — pulse / exclamation flavour
     };
+    // Breathing halo phase (single shared phase so all selected tiles
+    // pulse in unison — looks more intentional than per-tile timing).
+    const uint32_t phase     = NowMs() % 1500;
+    const int      halo_out  = (phase < 200) ? 1 : (phase < 400) ? 2 : 0;
     for (int i = 0; i < 4; ++i) {
       const int col = i % 2;
       const int row = i / 2;
       const int x   = col * kTileW;
       const int y   = kTileTop + row * kTileH;
       const bool sel = (highlighted_ == i + 1);
-      if (sel) oled.FillRect(x, y, kTileW, kTileH, true);
-      else     oled.Rect    (x, y, kTileW, kTileH);
+      if (sel) {
+        oled.FillRect(x, y, kTileW, kTileH, true);
+        // Outer breathing halo — pulses every 1.5 s.
+        if (halo_out > 0) {
+          oled.Rect(x - halo_out, y - halo_out,
+                    kTileW + halo_out * 2, kTileH + halo_out * 2);
+        }
+      } else {
+        oled.Rect(x, y, kTileW, kTileH);
+      }
       const bool ink_on = !sel;
       // Icon on the left side of the tile, text to its right.
       const int icon_x = x + 6;
@@ -1081,7 +1099,17 @@ static void RenderSimWindow() {
   bool running = g_clock_running.load();
   if (ImGui::Checkbox("Generator running (S)", &running)) g_clock_running.store(running);
   int bpm = g_bpm.load();
+  // Flash the BPM slider green for ~250 ms when DoTapTempo accepts a
+  // new tempo — gives an unmistakeable visual confirmation that the
+  // tap registered.
+  const bool tap_flash = NowMs() < g_tap_flash_until_ms_.load();
+  if (tap_flash) {
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,        IM_COL32(60, 150, 80, 255));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(70, 170, 95, 255));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  IM_COL32(50, 130, 70, 255));
+  }
   if (ImGui::SliderInt("BPM", &bpm, 20, 240)) g_bpm.store(bpm);
+  if (tap_flash) ImGui::PopStyleColor(3);
   if (ImGui::Button("Tap tempo (T)", ImVec2(160, 0))) DoTapTempo();
   ImGui::SameLine();
   ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
@@ -1310,8 +1338,8 @@ static void DoTogglePlay() {
 // Tap-tempo (sim only — drives the internal-clock BPM). On each tap, if
 // the interval since the previous tap is in a musical range (200..3000 ms
 // → 20..300 BPM), set g_bpm. First tap of a session just records the
-// timestamp.
-static std::atomic<uint32_t> g_last_tap_ms_{0};
+// timestamp. On a successful tap, g_tap_flash_until_ms_ kicks the BPM
+// slider into a brief green flash so the user gets visible feedback.
 static void DoTapTempo() {
   const auto now_ms = static_cast<uint32_t>(
       std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1321,7 +1349,10 @@ static void DoTapTempo() {
   const uint32_t interval = now_ms - last;
   if (interval < 200 || interval > 3000) return;     // outside musical range
   const int new_bpm = 60000 / static_cast<int>(interval);
-  if (new_bpm >= 20 && new_bpm <= 240) g_bpm.store(new_bpm);
+  if (new_bpm >= 20 && new_bpm <= 240) {
+    g_bpm.store(new_bpm);
+    g_tap_flash_until_ms_.store(now_ms + 250);
+  }
 }
 
 // Direct navigation — the sim doesn't have to play the "encoder dance"

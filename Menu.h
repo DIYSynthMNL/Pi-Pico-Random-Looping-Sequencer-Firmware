@@ -55,7 +55,8 @@ class View {
 // ============================================================
 class ViewStack {
  public:
-  static constexpr int kMaxDepth = 8;
+  static constexpr int      kMaxDepth     = 8;
+  static constexpr uint32_t kTransitionMs = 150;
 
   void Push(View* v);
   void Pop();
@@ -63,14 +64,22 @@ class ViewStack {
   int   depth() const { return depth_; }
   bool  can_pop() const { return depth_ > 1; }
 
-  void Draw(FakeOled& oled) const { if (View* v = top()) v->Draw(oled); }
+  // Non-const: drives the push/pop slide animation by reading NowMs().
+  // Composites outgoing + incoming view buffers into `oled` during the
+  // kTransitionMs window, then settles into a plain top()->Draw.
+  void Draw(FakeOled& oled);
   void OnRotate(int delta)        { if (View* v = top()) v->OnRotate(delta); }
   void OnPress()                  { if (View* v = top()) v->OnPress(); }
   void OnLongPress()              { if (View* v = top()) v->OnLongPress(); }
 
  private:
-  View* stack_[kMaxDepth] = {nullptr};
-  int   depth_            = 0;
+  enum class Transition : uint8_t { None, Pushing, Popping };
+
+  View*     stack_[kMaxDepth]      = {nullptr};
+  int       depth_                  = 0;
+  Transition transition_            = Transition::None;
+  View*     outgoing_view_         = nullptr;
+  uint32_t  transition_started_ms_ = 0;
 };
 
 // ============================================================

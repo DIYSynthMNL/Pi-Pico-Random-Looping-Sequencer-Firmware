@@ -1,10 +1,21 @@
 // Menu.cpp — see Menu.h.
 
 #include "Menu.h"
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 
 namespace seq {
+
+namespace {
+// Local time helper — kept private to Menu.cpp so the menu library
+// doesn't take a dep on playground globals.
+uint32_t MenuNowMs() {
+  return static_cast<uint32_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+}  // namespace
 
 namespace {
 constexpr int kPixelYShift = 20;
@@ -69,14 +80,79 @@ void View::OnLongPress() {
 // ============================================================
 void ViewStack::Push(View* v) {
   if (!v || depth_ >= kMaxDepth) return;
+  // Start a Pushing transition. Any in-flight transition collapses
+  // immediately — the new push wins.
+  outgoing_view_         = top();
+  transition_            = (outgoing_view_) ? Transition::Pushing : Transition::None;
+  transition_started_ms_ = MenuNowMs();
   v->set_stack(this);
   stack_[depth_++] = v;
 }
 
 void ViewStack::Pop() {
   if (depth_ <= 0) return;
+  // Start a Popping transition. outgoing_view_ is the view leaving the
+  // stack — held as an observer pointer for the kTransitionMs window
+  // (it may be heap-owned by the caller; the leak is pre-existing and
+  // tracked separately).
+  outgoing_view_         = top();
+  transition_            = (outgoing_view_) ? Transition::Popping : Transition::None;
+  transition_started_ms_ = MenuNowMs();
   --depth_;
   stack_[depth_] = nullptr;
+}
+
+void ViewStack::Draw(FakeOled& oled) {
+  View* current = top();
+
+  if (transition_ == Transition::None || outgoing_view_ == nullptr) {
+    if (current) current->Draw(oled);
+    return;
+  }
+  const uint32_t age = MenuNowMs() - transition_started_ms_;
+  if (age >= kTransitionMs) {
+    transition_    = Transition::None;
+    outgoing_view_ = nullptr;
+    if (current) current->Draw(oled);
+    return;
+  }
+
+  // Mid-transition — render both views into temp buffers and composite
+  // with a horizontal slide. Push: outgoing → left, incoming ← right.
+  // Pop: opposite.
+  FakeOled out_buf;
+  FakeOled in_buf;
+  outgoing_view_->Draw(out_buf);
+  if (current) current->Draw(in_buf);
+
+  const uint32_t kW = 128;
+  const uint32_t slide = (kW * age) / kTransitionMs;
+  int out_offset, in_offset;
+  if (transition_ == Transition::Pushing) {
+    out_offset = -static_cast<int>(slide);
+    in_offset  =  static_cast<int>(kW - slide);
+  } else {  // Popping
+    out_offset =  static_cast<int>(slide);
+    in_offset  = -static_cast<int>(kW - slide);
+  }
+
+  oled.Clear();
+  for (int y = 0; y < 64; ++y) {
+    // Compose outgoing
+    for (int x = 0; x < 128; ++x) {
+      const int sx = x - out_offset;
+      if (sx >= 0 && sx < 128 && out_buf.buf[y * 128 + sx]) {
+        oled.buf[y * 128 + x] = 255;
+      }
+    }
+    // Compose incoming on top
+    for (int x = 0; x < 128; ++x) {
+      const int sx = x - in_offset;
+      if (sx >= 0 && sx < 128 && in_buf.buf[y * 128 + sx]) {
+        oled.buf[y * 128 + x] = 255;
+      }
+    }
+  }
 }
 
 // ============================================================
