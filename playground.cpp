@@ -923,14 +923,54 @@ static void DoCyclePlaybackLayout() {
   g_playback_view.CycleLayout();
 }
 
+// Direct navigation — the sim doesn't have to play the "encoder dance"
+// to get into the menu. These helpers manipulate the view stack
+// directly so a mouse-driven user can jump anywhere in one click.
+static void DoGoHome() {
+  std::lock_guard<std::mutex> lk(g_mutex);
+  while (g_views.can_pop()) g_views.Pop();   // pop to PlaybackView (depth 1)
+}
+static void DoOpenMainMenu() {
+  std::lock_guard<std::mutex> lk(g_mutex);
+  while (g_views.can_pop()) g_views.Pop();
+  g_views.Push(&g_main_menu);
+}
+static void DoOpenSubmenu(seq::MenuListView* sub) {
+  std::lock_guard<std::mutex> lk(g_mutex);
+  while (g_views.can_pop()) g_views.Pop();
+  g_views.Push(&g_main_menu);
+  g_views.Push(sub);
+}
+static void DoBack() {
+  // Pop one level. Already what long-press does — wrapper for clarity.
+  DoEncoderLongPress();
+}
+
 // ============================================================
-//  Encoder & Inputs window — clickable mirror of the keyboard
+//  Controls window — direct navigation + hardware-encoder mirror
 // ============================================================
 static void RenderEncoderInputsWindow() {
-  ImGui::Begin("Encoder & Inputs");
+  ImGui::Begin("Controls");
 
-  // ---- Encoder ----
-  ImGui::SeparatorText("Encoder");
+  // ---- Direct navigation (sim-only — no hardware-encoder dance) ----
+  ImGui::SeparatorText("Navigation");
+  if (ImGui::Button("MENU (M)", ImVec2(120, 30))) DoOpenMainMenu();
+  ImGui::SameLine();
+  if (ImGui::Button("BACK",     ImVec2(80, 30)))  DoBack();
+  ImGui::SameLine();
+  if (ImGui::Button("HOME (H)", ImVec2(120, 30))) DoGoHome();
+
+  ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Jump straight to a category:");
+  if (ImGui::Button("Clock",   ImVec2(80, 0))) DoOpenSubmenu(&g_clock_menu);
+  ImGui::SameLine();
+  if (ImGui::Button("Pitch",   ImVec2(80, 0))) DoOpenSubmenu(&g_pitch_menu);
+  ImGui::SameLine();
+  if (ImGui::Button("Probs",   ImVec2(80, 0))) DoOpenSubmenu(&g_probs_menu);
+  ImGui::SameLine();
+  if (ImGui::Button("Actions", ImVec2(80, 0))) DoOpenSubmenu(&g_actions_menu);
+
+  // ---- Encoder (hardware mirror) ----
+  ImGui::SeparatorText("Encoder (mirrors hardware)");
   if (ImGui::Button("<<  rotate left",  ImVec2(140, 0))) DoEncoderRotate(-1);
   ImGui::SameLine();
   if (ImGui::Button("CLICK",            ImVec2(80, 0)))  DoEncoderPress();
@@ -974,6 +1014,8 @@ static void RenderEncoderInputsWindow() {
   row("S",            "Toggle internal clock");
   row("R",            "Reset transport");
   row("V",            "Cycle playback layout (Grid / Piano Roll)");
+  row("M",            "Open main menu");
+  row("H",            "Home — return to playback view");
   row("1 .. 9",       "Jump to menu item N");
   row("Esc / Q",      "Quit");
   ImGui::EndTable();
@@ -1016,6 +1058,12 @@ static void OnKey(GLFWwindow* win, int key, int /*sc*/, int action, int /*mods*/
       break;
     case GLFW_KEY_V:
       if (action == GLFW_PRESS) DoCyclePlaybackLayout();
+      break;
+    case GLFW_KEY_M:
+      if (action == GLFW_PRESS) DoOpenMainMenu();
+      break;
+    case GLFW_KEY_H:
+      if (action == GLFW_PRESS) DoGoHome();
       break;
     case GLFW_KEY_ESCAPE:
     case GLFW_KEY_Q:
