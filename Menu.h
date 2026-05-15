@@ -251,11 +251,21 @@ class SingleSelectItem : public MenuItem {
   const char* const* options() const { return options_; }
   int  option_count() const { return option_count_; }
 
+  // Optional: callback that returns the section name for any option
+  // index. Used by SingleSelectEditView to draw section dividers and
+  // show the current section in its title bar. Section detection uses
+  // pointer-equality on the returned strings — return the same string
+  // pointer for every index in a section.
+  typedef const char* (*SectionForIndexFn)(int idx);
+  void SetSectionForIndex(SectionForIndexFn fn) { section_fn_ = fn; }
+  SectionForIndexFn section_for_index_fn() const { return section_fn_; }
+
  private:
   const char*        name_;
   const char* const* options_;
   int                option_count_;
   int                selected_;
+  SectionForIndexFn  section_fn_ = nullptr;
 };
 
 // Like SingleSelectItem, but the editor lays out options in a grid

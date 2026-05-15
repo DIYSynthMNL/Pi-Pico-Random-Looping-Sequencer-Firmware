@@ -411,9 +411,20 @@ void SingleSelectEditView::OnPress() {
 
 void SingleSelectEditView::Draw(FakeOled& oled) const {
   oled.Clear();
-  char header[24];
-  std::snprintf(header, sizeof(header), "%s:%s",
-                item_->name(), item_->options()[draft_index_]);
+
+  // Header — show "Name:value (Section)" if the item has section info.
+  // The section follows the *draft* (current rotation target), so it
+  // updates live as the user scrolls past category boundaries.
+  const auto section_fn = item_->section_for_index_fn();
+  char header[28];
+  if (section_fn) {
+    std::snprintf(header, sizeof(header), "%s [%s]",
+                  item_->options()[draft_index_],
+                  section_fn(draft_index_));
+  } else {
+    std::snprintf(header, sizeof(header), "%s:%s",
+                  item_->name(), item_->options()[draft_index_]);
+  }
   oled.Text(2, 4, header);
   oled.Rect(0, 0, 128, 15);
 
@@ -424,6 +435,18 @@ void SingleSelectEditView::Draw(FakeOled& oled) const {
   for (int i = 0; i < rows; ++i) {
     const int item_idx = scroll_start_ + i;
     const int y = (i * (kLineHeight + kSpacer)) + kPixelYShift;
+
+    // Section divider line above this row if section_fn says this index
+    // starts a new section (i.e. its section differs from the previous
+    // index's section). Pointer equality on the returned strings — see
+    // SetSectionForIndex contract.
+    if (section_fn && item_idx > 0 &&
+        section_fn(item_idx) != section_fn(item_idx - 1)) {
+      // Dashed line — every other pixel — to read as a divider not a
+      // selection underline.
+      for (int x = 0; x < 128; x += 3) oled.Px(x, y - 2, true);
+    }
+
     char line[24];
     std::snprintf(line, sizeof(line), "%s%s",
                   item_idx == previously_selected ? "*" : "",

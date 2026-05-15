@@ -699,6 +699,12 @@ class MainMenuView : public seq::View {
 
   void DrawTiles(seq::FakeOled& oled) const {
     static const char* kNames[4] = { "CLOCK", "PITCH", "PROBS", "ACTIONS" };
+    const icons::Icon6x8* tile_icons[4] = {
+      &icons::kReset,   // Clock — circle (closest to clock face)
+      &icons::kNote,    // Pitch — music note
+      &icons::kDice,    // Probs — dice
+      &icons::kTrig,    // Actions — pulse / exclamation flavour
+    };
     for (int i = 0; i < 4; ++i) {
       const int col = i % 2;
       const int row = i / 2;
@@ -707,11 +713,19 @@ class MainMenuView : public seq::View {
       const bool sel = (highlighted_ == i + 1);
       if (sel) oled.FillRect(x, y, kTileW, kTileH, true);
       else     oled.Rect    (x, y, kTileW, kTileH);
+      const bool ink_on = !sel;
+      // Icon on the left side of the tile, text to its right.
+      const int icon_x = x + 6;
+      const int icon_y = y + (kTileH - 8) / 2;
+      icons::Draw(oled, *tile_icons[i], icon_x, icon_y, ink_on);
       const char* name = kNames[i];
       const int name_w = static_cast<int>(std::strlen(name)) * 6;
-      const int tx = x + (kTileW - name_w) / 2;
+      // Right of the icon, then visually centred in the remaining space.
+      const int region_start = icon_x + 8;
+      const int region_w     = (x + kTileW) - region_start;
+      const int tx = region_start + (region_w - name_w) / 2;
       const int ty = y + (kTileH - 8) / 2;
-      oled.Text(tx, ty, name, !sel);
+      oled.Text(tx, ty, name, ink_on);
     }
   }
 
@@ -765,6 +779,8 @@ static void BuildMenu() {
   g_run_item          = new seq::ToggleItem("Play", true);
   g_scale_item        = new seq::SingleSelectItem(
       "Scale", g_scale_names.data(), seq::kNumScales, g_scale_idx);
+  // Wire the scale section info — Scales.h provides ScaleSectionForIndex.
+  g_scale_item->SetSectionForIndex(&seq::ScaleSectionForIndex);
   g_cv_prob_item      = new seq::NumericalItem("CVProb",    0,  0, 100, 5);
   g_trig_prob_item    = new seq::NumericalItem("TrigProb",  0,  0, 100, 5);
   g_trig_length_item  = new seq::NumericalItem("TrgLngth%",50,  0, 100, 10);
